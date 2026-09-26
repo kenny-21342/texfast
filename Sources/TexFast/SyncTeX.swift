@@ -9,16 +9,20 @@ struct PDFLocation {
     let height: Double
 }
 
+struct SourceLocation {
+    let url: URL
+    let line: Int
+}
+
 /// Wrapper around the `synctex` binary.
 ///
-/// Everything is compiled from the shadow copy, so positions come back naming
-/// that file. Both directions translate between it and the file the user is
-/// actually editing.
+/// The main document is compiled from a shadow copy, while included files keep
+/// their own paths. The caller maps the shadow path back to the main source.
 enum SyncTeX {
 
-    static func forward(line: Int, column: Int, shadow: URL, pdf: URL) -> PDFLocation? {
+    static func forward(line: Int, column: Int, source: URL, pdf: URL) -> PDFLocation? {
         guard let exe = Shell.which("synctex") else { return nil }
-        let spec = "\(line):\(max(1, column)):\(shadow.path)"
+        let spec = "\(line):\(max(1, column)):\(source.path)"
         let r = Shell.run(exe, ["view", "-i", spec, "-o", pdf.path], cwd: pdf.deletingLastPathComponent())
         guard r.status == 0 else { return nil }
 
@@ -41,15 +45,24 @@ enum SyncTeX {
         return PDFLocation(page: page, x: x, y: y, width: w ?? 10, height: h ?? 10)
     }
 
-    /// Returns the 1-based line in the shadow file, which shares numbering with
-    /// the real source.
-    static func inverse(page: Int, x: Double, y: Double, pdf: URL) -> Int? {
+    /// Returns the input file and its 1-based line. The main input may be the
+    /// shadow copy; included chapters point at their source files.
+    static func inverse(page: Int, x: Double, y: Double, pdf: URL) -> SourceLocation? {
         guard let exe = Shell.which("synctex") else { return nil }
         let spec = "\(page):\(x):\(y):\(pdf.path)"
         let r = Shell.run(exe, ["edit", "-o", spec], cwd: pdf.deletingLastPathComponent())
         guard r.status == 0 else { return nil }
-        for line in r.output.split(separator: "\n") where line.hasPrefix("Line:") {
-            return Int(line.dropFirst("Line:".count))
+        var input: String?
+        var lineNumber: Int?
+        for line in r.output.split(separator: "\n") {
+            if line.hasPrefix("Input:") { input = String(line.dropFirst("Input:".count)) }
+            if line.hasPrefix("Line:") { lineNumber = Int(line.dropFirst("Line:".count)) }
+            if let input, let lineNumber {
+                let url = input.hasPrefix("/")
+                    ? URL(fileURLWithPath: input).standardizedFileURL
+                    : URL(fileURLWithPath: input, relativeTo: pdf.deletingLastPathComponent()).standardizedFileURL
+                return SourceLocation(url: url.resolvingSymlinksInPath(), line: lineNumber)
+            }
         }
         return nil
     }

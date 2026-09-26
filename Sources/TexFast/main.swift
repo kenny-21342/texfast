@@ -4,6 +4,12 @@ import TexFastCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [MainWindowController] = []
     private var homeController: HomeWindowController?
+    private var aboutController: AboutWindowController?
+    private var settingsController: SettingsWindowController?
+    private var finalRenderWindow: NSWindow?
+    private var finalRenderLabel: NSTextField?
+    private var finalRenderProgress: NSProgressIndicator?
+    private var isRenderingOnQuit = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -20,6 +26,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isRenderingOnQuit { return .terminateLater }
+        guard !controllers.isEmpty else { return .terminateNow }
+
+        for controller in controllers {
+            if let error = controller.prepareForFinalRender() {
+                let alert = NSAlert()
+                alert.messageText = "Final render could not start"
+                alert.informativeText = error
+                alert.runModal()
+                return .terminateCancel
+            }
+        }
+
+        isRenderingOnQuit = true
+        controllers.forEach { $0.setEditingEnabled(false) }
+        showFinalRenderWindow()
+        renderNextDocument(at: 0)
+        return .terminateLater
+    }
+
+    private func showFinalRenderWindow() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 115),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Rendering final PDF"
+        window.center()
+        let content = NSView(frame: window.contentView!.bounds)
+        let label = NSTextField(labelWithString: "Preparing final PDF…")
+        label.frame = NSRect(x: 22, y: 65, width: 386, height: 24)
+        let progress = NSProgressIndicator(frame: NSRect(x: 22, y: 30, width: 386, height: 18))
+        progress.isIndeterminate = true
+        progress.style = .bar
+        content.addSubview(label)
+        content.addSubview(progress)
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        finalRenderWindow = window
+        finalRenderLabel = label
+        finalRenderProgress = progress
+        progress.startAnimation(nil)
+    }
+
+    private func renderNextDocument(at index: Int) {
+        guard index < controllers.count else {
+            finalRenderWindow?.close()
+            finalRenderWindow = nil
+            finalRenderLabel = nil
+            finalRenderProgress = nil
+            isRenderingOnQuit = false
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
+        }
+        controllers[index].renderFinal(onProgress: { [weak self] message, fraction in
+            guard let self else { return }
+            finalRenderLabel?.stringValue = message
+            if let fraction {
+                finalRenderProgress?.stopAnimation(nil)
+                finalRenderProgress?.isIndeterminate = false
+                finalRenderProgress?.doubleValue = fraction * 100
+            } else {
+                finalRenderProgress?.isIndeterminate = true
+                finalRenderProgress?.startAnimation(nil)
+            }
+        }, finished: { [weak self] error in
+            guard let self else { return }
+            if let error {
+                finalRenderWindow?.close()
+                finalRenderWindow = nil
+                isRenderingOnQuit = false
+                controllers.forEach { $0.setEditingEnabled(true) }
+                NSApp.reply(toApplicationShouldTerminate: false)
+                let alert = NSAlert()
+                alert.messageText = "Final render failed"
+                alert.informativeText = error
+                alert.runModal()
+            } else {
+                renderNextDocument(at: index + 1)
+            }
+        })
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         controllers.forEach { $0.shutDown() }
@@ -49,10 +136,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         homeController?.home.reload()
         homeController?.showWindow(nil)
         homeController?.window?.makeKeyAndOrderFront(nil)
+        homeController?.home.focusDefaultAction()
+    }
+
+    @objc func showAbout(_ sender: Any?) {
+        if aboutController == nil { aboutController = AboutWindowController() }
+        aboutController?.showWindow(nil)
+        aboutController?.window?.makeKeyAndOrderFront(nil)
+        aboutController?.window?.makeFirstResponder(nil)
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsController == nil { settingsController = SettingsWindowController() }
+        settingsController?.settings.refresh()
+        settingsController?.showWindow(nil)
+        settingsController?.window?.makeKeyAndOrderFront(nil)
     }
 
     private func openDocument(at url: URL) {
-        let url = url.standardizedFileURL
+        let url = url.resolvingSymlinksInPath().standardizedFileURL
         if let existing = controllers.first(where: { $0.documentURL == url }) {
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
@@ -71,7 +173,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About TexFast", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let about = appMenu.addItem(withTitle: "About TexFast", action: #selector(showAbout(_:)), keyEquivalent: "")
+        about.target = self
+        appMenu.addItem(.separator())
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settings.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide TexFast", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit TexFast", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -139,7 +245,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Toggle Outline", action: #selector(MainWindowController.toggleOutline(_:)), keyEquivalent: "0")
+        viewMenu.addItem(withTitle: "Toggle Sidebar", action: #selector(MainWindowController.toggleOutline(_:)), keyEquivalent: "0")
+        viewMenu.addItem(withTitle: "Toggle Terminal", action: #selector(MainWindowController.toggleTerminal(_:)), keyEquivalent: "1")
+        viewMenu.addItem(withTitle: "Toggle Problems", action: #selector(MainWindowController.toggleProblems(_:)), keyEquivalent: "2")
         viewMenu.addItem(withTitle: "Show in Preview", action: #selector(MainWindowController.syncToPreview(_:)), keyEquivalent: "j")
         viewItem.submenu = viewMenu
         main.addItem(viewItem)

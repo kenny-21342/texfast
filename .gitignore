@@ -1,3 +1,5 @@
 .build/
 TexFast.app/
 .DS_Store
+CLAUDE.md
+.texfast/

@@ -6,6 +6,7 @@ final class OutlineViewController: NSViewController, NSTableViewDataSource, NSTa
     private let scroll = NSScrollView()
     private var items: [OutlineItem] = []
     var onSelect: ((Int) -> Void)?
+    var onCountChanged: ((Int) -> Void)?
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("name"))
@@ -28,6 +29,7 @@ final class OutlineViewController: NSViewController, NSTableViewDataSource, NSTa
     func update(_ items: [OutlineItem]) {
         self.items = items
         table.reloadData()
+        onCountChanged?(items.count)
     }
 
     @objc private func rowClicked() {

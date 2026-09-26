@@ -6,13 +6,15 @@ func usage() -> Never {
     fastex — a fast incremental build driver for XeLaTeX documents
 
     USAGE
-      fastex build [--final] [-j N] <file.tex>   compile (draft by default)
+      fastex build [--final|--preview] [-j N] <file.tex>
+                                                 compile (draft by default)
       fastex warm  [-j N] <file.tex>             populate the figure cache only
       fastex clean <file.tex>                    drop the cache
 
     Draft builds downsample raster images to cached JPEGs and reuse externalized
     TikZ figures; the PDF stays in .texfast/build/. --final uses the original
-    images and writes the PDF next to the source. The source is never modified.
+    images, runs two passes and writes the PDF next to the source. --preview
+    uses one pass for a faster draft. The source is never modified.
     """)
     exit(0)
 }
@@ -23,6 +25,7 @@ args.removeFirst()
 if command == "-h" || command == "--help" { usage() }
 
 var draft = true
+var previewOnly = false
 var jobs = ProcessInfo.processInfo.activeProcessorCount
 var path: String? = nil
 
@@ -31,6 +34,7 @@ while i < args.count {
     switch args[i] {
     case "--final": draft = false
     case "--draft": draft = true
+    case "--preview": previewOnly = true
     case "-j", "--jobs":
         i += 1
         guard i < args.count, let n = Int(args[i]) else { fail("-j needs a number") }
@@ -43,6 +47,7 @@ while i < args.count {
 }
 
 guard let path else { usage() }
+if previewOnly && !draft { fail("--preview cannot be combined with --final") }
 let texFile = URL(fileURLWithPath: path).standardizedFileURL
 guard FileManager.default.fileExists(atPath: texFile.path) else { fail("no such file: \(path)") }
 let projectDir = texFile.deletingLastPathComponent()
@@ -56,7 +61,7 @@ case "clean":
 case "warm", "build":
     let driver = Driver(texFile: texFile, projectDir: projectDir, cacheDir: cacheDir,
                         draft: draft, jobs: jobs)
-    let r = driver.build(figuresOnly: command == "warm")
+    let r = driver.build(figuresOnly: command == "warm", previewOnly: previewOnly)
     if let error = r.error { fail(error) }
 
     var bits: [String] = []

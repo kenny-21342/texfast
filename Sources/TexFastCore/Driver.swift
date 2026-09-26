@@ -14,6 +14,10 @@ public struct BuildReport {
     public var figureSeconds = 0.0
     public var pdfSeconds = 0.0
     public var totalSeconds = 0.0
+    /// Compiler output is retained for the editor's clickable Problems list.
+    public var texOutput = ""
+    /// nonstopmode can produce a PDF while still reporting source errors.
+    public var texHadErrors = false
 }
 
 public struct Driver {
@@ -51,7 +55,8 @@ public struct Driver {
 
     // MARK: - entry points
 
-    public func build(figuresOnly: Bool) -> BuildReport {
+    public func build(figuresOnly: Bool, previewOnly: Bool = false,
+                      onPage: ((Int, Int) -> Void)? = nil) -> BuildReport {
         let started = Date()
         var report = BuildReport()
 
@@ -141,13 +146,17 @@ public struct Driver {
             return report
         }
 
-        // 4. TeX passes, reruns only when cross-references actually moved.
+        // 4. Interactive previews use one pass to show edits sooner. CLI drafts
+        //    rerun when cross-references move. Final output always gets two passes.
         var fingerprint = auxFingerprint()
-        for pass in 1...2 {
-            let r = runTeX(xelatex)
+        let passLimit = draft && previewOnly ? 1 : 2
+        for pass in 1...passLimit {
+            let r = runTeX(xelatex, pass: pass, onPage: onPage)
             report.texSeconds += r.duration
             report.passes = pass
-            if r.status != 0 && !FileManager.default.fileExists(atPath: xdvPath().path) {
+            report.texOutput = r.output
+            report.texHadErrors = report.texHadErrors || r.status != 0
+            if r.status != 0 && (!draft || !FileManager.default.fileExists(atPath: xdvPath().path)) {
                 appendLog(r.output)
                 report.error = lastErrors(from: r.output).isEmpty
                     ? "xelatex failed — see \(buildDir.appendingPathComponent(jobName + ".log").path)"
@@ -155,9 +164,12 @@ public struct Driver {
                 return report
             }
             let after = auxFingerprint()
-            if after == fingerprint { break }
+            if draft && after == fingerprint { break }
             fingerprint = after
-            if pass == 1 { log("fastex: cross-references moved, running pass 2") }
+            if pass == 1 && passLimit > 1 {
+                log(draft ? "fastex: cross-references moved, running pass 2"
+                          : "fastex: final build, running pass 2")
+            }
         }
 
         // 5. xdv -> pdf
@@ -167,7 +179,7 @@ public struct Driver {
             // build then fails on it. Regenerate it once before giving up.
             appendLog("xdvipdfmx failed, regenerating the .xdv and retrying:\n" + pdfRun.output)
             try? FileManager.default.removeItem(at: xdvPath())
-            let retry = runTeX(xelatex)
+            let retry = runTeX(xelatex, pass: report.passes + 1, onPage: onPage)
             report.texSeconds += retry.duration
             pdfRun = Shell.run(xdvipdfmx, ["-q", "-o", jobName + ".pdf", jobName + ".xdv"], cwd: buildDir)
         }
@@ -182,8 +194,20 @@ public struct Driver {
         if !draft {
             // Only a lossless build is allowed to land next to the source.
             let final = projectDir.appendingPathComponent(jobName + ".pdf")
-            try? FileManager.default.removeItem(at: final)
-            try? FileManager.default.copyItem(at: out, to: final)
+            let temporary = projectDir.appendingPathComponent(".\(jobName).texfast-final.pdf")
+            do {
+                try? FileManager.default.removeItem(at: temporary)
+                try FileManager.default.copyItem(at: out, to: temporary)
+                if FileManager.default.fileExists(atPath: final.path) {
+                    _ = try FileManager.default.replaceItemAt(final, withItemAt: temporary)
+                } else {
+                    try FileManager.default.moveItem(at: temporary, to: final)
+                }
+            } catch {
+                report.error = "Could not write final PDF: \(error.localizedDescription)"
+                try? FileManager.default.removeItem(at: temporary)
+                return report
+            }
             out = final
         }
         report.pdf = out
@@ -206,12 +230,27 @@ public struct Driver {
         try? text.write(to: shadowTeX(), atomically: true, encoding: .utf8)
     }
 
-    private func runTeX(_ xelatex: String) -> RunResult {
-        Shell.run(xelatex,
-                  ["-shell-escape", "-no-pdf", "-synctex=1",
-                   "-interaction=nonstopmode", "-file-line-error", jobName + ".tex"],
+    private func runTeX(_ xelatex: String, pass: Int, onPage: ((Int, Int) -> Void)?) -> RunResult {
+        let args = ["-shell-escape", "-no-pdf", "-synctex=1",
+                    "-interaction=nonstopmode", "-file-line-error", jobName + ".tex"]
+        let environment = ["TEXINPUTS": ".:\(projectDir.path):"]
+        guard let onPage else { return Shell.run(xelatex, args, cwd: buildDir, env: environment) }
+        var tail = ""
+        let pagePattern = try! NSRegularExpression(pattern: #"\[(\d+)\]"#)
+        return Shell.run(xelatex,
+                  args,
                   cwd: buildDir,
-                  env: ["TEXINPUTS": ".:\(projectDir.path):"])
+                  env: environment,
+                  onOutput: { chunk in
+                      tail += chunk
+                      let ns = tail as NSString
+                      let matches = pagePattern.matches(in: tail, range: NSRange(location: 0, length: ns.length))
+                      for match in matches {
+                          if let page = Int(ns.substring(with: match.range(at: 1))) { onPage(pass, page) }
+                      }
+                      let consumed = matches.last.map { NSMaxRange($0.range) } ?? 0
+                      tail = ns.substring(from: max(consumed, ns.length - 64))
+                  })
     }
 
     /// Compile each missing picture in its own process. This is exactly what

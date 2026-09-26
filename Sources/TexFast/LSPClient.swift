@@ -6,6 +6,14 @@ struct CompletionItem {
     let detail: String?
     let insertText: String
     let kindRank: Int
+    let edit: CompletionEdit?
+}
+
+struct CompletionEdit {
+    let startLine: Int
+    let startCharacter: Int
+    let endLine: Int
+    let endCharacter: Int
 }
 
 struct Diagnostic {
@@ -40,7 +48,7 @@ final class LSPClient {
     private let lock = NSLock()
     private let rootURI: URL
 
-    var onDiagnostics: (([Diagnostic]) -> Void)?
+    var onDiagnostics: ((URL, [Diagnostic]) -> Void)?
     private(set) var isRunning = false
     /// The server ignores everything sent before it answers `initialize`, so
     /// traffic is held until the handshake completes and then flushed in order.
@@ -102,6 +110,10 @@ final class LSPClient {
         ]])
     }
 
+    func didClose(_ url: URL) {
+        notify("textDocument/didClose", ["textDocument": ["uri": url.absoluteString]])
+    }
+
     private var version = 1
     func didChange(_ url: URL, text: String) {
         version += 1
@@ -135,8 +147,18 @@ final class LSPClient {
                     insert = newText
                 }
                 let detail = (item["detail"] as? String) ?? (item["documentation"] as? String)
+                var parsedEdit: CompletionEdit?
+                if let edit = item["textEdit"] as? [String: Any],
+                   let range = edit["range"] as? [String: Any],
+                   let start = range["start"] as? [String: Int],
+                   let end = range["end"] as? [String: Int],
+                   let startLine = start["line"], let startCharacter = start["character"],
+                   let endLine = end["line"], let endCharacter = end["character"] {
+                    parsedEdit = CompletionEdit(startLine: startLine, startCharacter: startCharacter,
+                                                endLine: endLine, endCharacter: endCharacter)
+                }
                 return CompletionItem(label: label, detail: detail, insertText: insert,
-                                      kindRank: item["kind"] as? Int ?? 99)
+                                      kindRank: item["kind"] as? Int ?? 99, edit: parsedEdit)
             }
             DispatchQueue.main.async { reply(parsed) }
         }
@@ -231,6 +253,8 @@ final class LSPClient {
         }
         guard message["method"] as? String == "textDocument/publishDiagnostics",
               let params = message["params"] as? [String: Any],
+              let uri = params["uri"] as? String,
+              let url = URL(string: uri), url.isFileURL,
               let raw = params["diagnostics"] as? [[String: Any]] else { return }
         let diags: [Diagnostic] = raw.compactMap { d in
             guard let message = d["message"] as? String,
@@ -242,6 +266,6 @@ final class LSPClient {
                               message: message,
                               severity: d["severity"] as? Int ?? 1)
         }
-        DispatchQueue.main.async { [weak self] in self?.onDiagnostics?(diags) }
+        DispatchQueue.main.async { [weak self] in self?.onDiagnostics?(url.standardizedFileURL, diags) }
     }
 }

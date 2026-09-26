@@ -7,8 +7,16 @@ final class PDFPaneController: NSViewController {
 
     let pdfView = PDFView()
     private var url: URL?
-    /// ⌘-click in the PDF asks the editor to jump to the matching source line.
-    var onReverseSync: ((Int) -> Void)?
+    /// Clicking a PDF page asks the editor to jump to the matching source line.
+    var onReverseSync: ((SourceLocation) -> Void)?
+    var onPageChanged: ((Int, Int) -> Void)?
+    private var pageObserver: NSObjectProtocol?
+    private var clickMonitor: Any?
+
+    deinit {
+        if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+    }
 
     override func loadView() {
         pdfView.autoScales = true
@@ -17,9 +25,18 @@ final class PDFPaneController: NSViewController {
         pdfView.backgroundColor = .underPageBackgroundColor
         view = pdfView
 
-        let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
-        click.numberOfClicksRequired = 1
-        pdfView.addGestureRecognizer(click)
+        // PDFKit's internal page view handles mouse clicks before a recognizer
+        // attached to PDFView can see them. A local monitor observes the click
+        // without consuming it, so text selection and links still work.
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, event.window === pdfView.window else { return event }
+            let point = pdfView.convert(event.locationInWindow, from: nil)
+            if pdfView.bounds.contains(point) { handleClick(at: point) }
+            return event
+        }
+        pageObserver = NotificationCenter.default.addObserver(
+            forName: .PDFViewPageChanged, object: pdfView, queue: .main
+        ) { [weak self] _ in self?.reportPage() }
     }
 
     func load(_ url: URL) {
@@ -43,6 +60,7 @@ final class PDFPaneController: NSViewController {
                 clip.enclosingScrollView?.reflectScrolledClipView(clip)
             }
         }
+        reportPage()
     }
 
     /// Scroll to a SyncTeX hit and flash it, so the eye lands in the right place.
@@ -59,7 +77,17 @@ final class PDFPaneController: NSViewController {
                           height: max(location.height, 12) + 8)
 
         pdfView.go(to: rect, on: page)
+        reportPage()
         flash(rect, on: page)
+    }
+
+    private func reportPage() {
+        guard let document = pdfView.document else {
+            onPageChanged?(0, 0)
+            return
+        }
+        let page = pdfView.currentPage.map { document.index(for: $0) + 1 } ?? 1
+        onPageChanged?(page, document.pageCount)
     }
 
     private func flash(_ rect: NSRect, on page: PDFPage) {
@@ -71,10 +99,9 @@ final class PDFPaneController: NSViewController {
         }
     }
 
-    @objc private func handleClick(_ gesture: NSClickGestureRecognizer) {
-        guard NSEvent.modifierFlags.contains(.command), let url else { return }
-        let point = gesture.location(in: pdfView)
-        guard let page = pdfView.page(for: point, nearest: true),
+    private func handleClick(at point: NSPoint) {
+        guard let url else { return }
+        guard let page = pdfView.page(for: point, nearest: false),
               let document = pdfView.document else { return }
         let pageIndex = document.index(for: page)
         let onPage = pdfView.convert(point, to: page)
@@ -83,8 +110,8 @@ final class PDFPaneController: NSViewController {
         let x = onPage.x
         let y = bounds.height - onPage.y      // back to SyncTeX's top-left origin
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let line = SyncTeX.inverse(page: pageIndex + 1, x: Double(x), y: Double(y), pdf: url) else { return }
-            DispatchQueue.main.async { self?.onReverseSync?(line) }
+            guard let location = SyncTeX.inverse(page: pageIndex + 1, x: Double(x), y: Double(y), pdf: url) else { return }
+            DispatchQueue.main.async { self?.onReverseSync?(location) }
         }
     }
 }

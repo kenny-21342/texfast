@@ -15,7 +15,8 @@ public enum Shell {
     public static func run(_ launchPath: String,
                     _ args: [String],
                     cwd: URL,
-                    env extra: [String: String] = [:]) -> RunResult {
+                    env extra: [String: String] = [:],
+                    onOutput: ((String) -> Void)? = nil) -> RunResult {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: launchPath)
         p.arguments = args
@@ -41,7 +42,12 @@ public enum Shell {
         let q = DispatchQueue(label: "drain")
         let done = DispatchSemaphore(value: 0)
         q.async {
-            data = pipe.fileHandleForReading.readDataToEndOfFile()
+            while true {
+                let chunk = pipe.fileHandleForReading.availableData
+                if chunk.isEmpty { break }
+                data.append(chunk)
+                onOutput?(String(decoding: chunk, as: UTF8.self))
+            }
             done.signal()
         }
         p.waitUntilExit()

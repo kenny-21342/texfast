@@ -31,14 +31,15 @@ enum ShadowSource {
             }
         }
 
-        if options.externalize {
+        let activePictures = scan.pictures.filter { !options.blockedKeys.contains($0.key) }
+        if options.externalize && !activePictures.isEmpty {
             // Externalization is opt-in, one picture at a time. Anything the
             // scanner does not recognise — `\tikz{...}` shorthand, pictures
             // built inside macros — stays disabled and compiles inline exactly
             // as it did before. Enabling globally instead would make tikz
             // discard those pictures ("IMAGE DISCARDED DUE TO ...") because no
             // cached PDF was ever generated for them.
-            for pic in scan.pictures where !options.blockedKeys.contains(pic.key) {
+            for pic in activePictures {
                 edit(pic.start, 0, "\\tikzexternalenable\\tikzsetnextfilename{f\(pic.key)}")
                 edit(pic.end, 0, "\\tikzexternaldisable ")
             }
