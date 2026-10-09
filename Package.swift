@@ -16,6 +16,7 @@ let package = Package(
         .executableTarget(name: "TexFast", dependencies: [
             "TexFastCore", .product(name: "SwiftTerm", package: "SwiftTerm")
         ], path: "Sources/TexFast",
-                          linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path"])])
+                          linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path"])]),
+        .testTarget(name: "TexFastCoreTests", dependencies: ["TexFastCore"])
     ]
 )

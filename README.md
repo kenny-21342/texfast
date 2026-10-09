@@ -8,7 +8,7 @@ TexFast is a native macOS LaTeX editor with a LuaLaTeX preview loop. It pairs a 
 - A TeX installation with `lualatex`, `synctex`, and `luatexja-fontspec` available (for example, MacTeX). TexFast also checks `/Library/TeX/texbin` when launched from Finder.
 - [texlab](https://github.com/latex-lsp/texlab) is optional but needed for language-server completions, diagnostics, and outline data. On a Mac with Homebrew: `brew install texlab`.
 
-Download `TexFast-v1.1.0-macOS.zip` from [Releases](https://github.com/kenny-21342/texfast/releases), unzip it, and move `TexFast.app` to `/Applications`. The release is ad-hoc signed and is not notarized, so macOS may ask you to approve opening it.
+Download `TexFast-v1.1.1-macOS.zip` from [Releases](https://github.com/kenny-21342/texfast/releases), unzip it, and move `TexFast.app` to `/Applications`. The release is ad-hoc signed and is not notarized, so macOS may ask you to approve opening it.
 
 ## Using the editor
 
@@ -36,9 +36,9 @@ Download `TexFast-v1.1.0-macOS.zip` from [Releases](https://github.com/kenny-213
 
 ## How the build works
 
-`fastex` renders a **shadow source** under `.texfast/build/`, leaving the project's `.tex` source unchanged. Its inline substitutions preserve source line numbers so errors and SyncTeX positions can map back to the real file. Build jobs share a lock to prevent the app and CLI from writing the same intermediate files at once.
+`fastex` renders a **shadow source** under `.texfast/build-lualatex/`, leaving the project's `.tex` source unchanged. Its inline substitutions preserve source line numbers so errors and SyncTeX positions can map back to the real file. Build jobs share a lock to prevent the app and CLI from writing the same intermediate files at once.
 
-For a draft, it hashes supported TikZ pictures and reuses their cached PDFs; pictures that cannot be externalized compile inline. It also converts eligible raster images to cached JPEGs. The app's live preview normally runs one LuaLaTeX pass, so changed cross-references may settle on the next preview. The draft PDF lives at `.texfast/build-lualatex/<name>.pdf` and can differ slightly from the final PDF. LuaLaTeX writes the PDF directly, without a separate XDV conversion step.
+For a draft, it hashes supported TikZ pictures and reuses their cached PDFs; pictures that cannot be externalized compile inline. It also converts eligible raster images to cached JPEGs. The app's live preview normally runs one LuaLaTeX pass, so changed cross-references may settle on the next preview. When a new edit makes a running preview obsolete, TexFast stops that build and compiles the latest saved version. The draft PDF lives at `.texfast/build-lualatex/<name>.pdf` and can differ slightly from the final PDF. LuaLaTeX writes the PDF directly, without a separate XDV conversion step.
 
 A **final** build uses the original images, disables figure externalization, runs two LuaLaTeX passes, and writes `<name>.pdf` beside the root source. Quitting the app triggers this build after saving pending edits. Build speed depends on the document and its figures; a fresh figure cache takes longer than subsequent previews.
 

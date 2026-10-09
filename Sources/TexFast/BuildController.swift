@@ -5,7 +5,7 @@ import TexFastCore
 /// Serialises builds and keeps the UI informed. Builds run off the main queue;
 /// a build requested while one is in flight is coalesced into a single rerun.
 final class BuildController {
-    enum State { case idle, warming, building }
+    enum State { case idle, building }
 
     private let driver: Driver
     private let queue = DispatchQueue(label: "texfast.build")
@@ -13,6 +13,8 @@ final class BuildController {
     private var pendingRebuild = false
     private var renderingFinal = false
     private var sourceRevision = 0
+    private var activeRevision = -1
+    private var currentCancellation: BuildCancellation?
 
     var onState: ((State, String) -> Void)?
     var onFinished: ((BuildReport?) -> Void)?
@@ -22,38 +24,53 @@ final class BuildController {
     var pdfURL: URL { driver.draftPDF }
     var shadowURL: URL { driver.shadowFile }
     var buildLogURL: URL { driver.buildLog }
+    var isBusy: Bool { running || renderingFinal }
 
-    func sourceDidChange() { sourceRevision += 1 }
+    func sourceDidChange() {
+        sourceRevision += 1
+        currentCancellation?.cancel()
+    }
 
     /// True before the figure cache exists, when the first build is minutes, not seconds.
     var needsWarmUp: Bool {
         !FileManager.default.fileExists(atPath: driver.buildDir.appendingPathComponent("figs").path)
     }
 
-    func warmUp() {
-        report(.warming, "Building figure cache — this happens once")
-        queue.async { [self] in
-            let r = driver.build(figuresOnly: true)
-            DispatchQueue.main.async { [self] in
-                if !running { report(.idle, "Cached \(r.figuresBuilt) figure(s)") }
-            }
-        }
-    }
-
     func build() {
         if renderingFinal { return }
-        if running { pendingRebuild = true; return }
+        if running {
+            if sourceRevision == activeRevision { return }
+            pendingRebuild = true
+            currentCancellation?.cancel()
+            return
+        }
         running = true
         let revision = sourceRevision
-        report(.building, "Compiling…")
+        activeRevision = revision
+        let cancellation = BuildCancellation()
+        currentCancellation = cancellation
+        report(.building, needsWarmUp ? "Building figure cache…" : "Compiling…")
         queue.async { [self] in
-            let r = driver.build(figuresOnly: false, previewOnly: true)
+            let r = driver.build(figuresOnly: false, previewOnly: true,
+                                 cancellation: cancellation)
             DispatchQueue.main.async { [self] in
                 running = false
+                currentCancellation = nil
+                if renderingFinal { return }
+                if pendingRebuild {
+                    pendingRebuild = false
+                    onFinished?(nil)
+                    build()
+                    return
+                }
+                if r.cancelled {
+                    report(.idle, "Preview waiting for the latest edit…")
+                    onFinished?(nil)
+                    return
+                }
                 let summary = r.error ?? String(format: "%.1fs · %d figure(s) cached", r.totalSeconds, r.figuresCached)
                 report(.idle, summary)
-                onFinished?(pendingRebuild || revision != sourceRevision ? nil : r)
-                if pendingRebuild { pendingRebuild = false; build() }
+                onFinished?(revision == sourceRevision ? r : nil)
             }
         }
     }
@@ -64,6 +81,7 @@ final class BuildController {
                     finished: @escaping (BuildReport) -> Void) {
         renderingFinal = true
         pendingRebuild = false
+        currentCancellation?.cancel()
         var finalDriver = driver
         finalDriver.draft = false
         report(.building, "Rendering final PDF…")

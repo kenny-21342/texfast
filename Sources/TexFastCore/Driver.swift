@@ -17,6 +17,7 @@ public struct BuildReport {
     public var texOutput = ""
     /// nonstopmode can produce a PDF while still reporting source errors.
     public var texHadErrors = false
+    public var cancelled = false
 }
 
 public struct Driver {
@@ -55,6 +56,7 @@ public struct Driver {
     // MARK: - entry points
 
     public func build(figuresOnly: Bool, previewOnly: Bool = false,
+                      cancellation: BuildCancellation? = nil,
                       onPage: ((Int, Int) -> Void)? = nil) -> BuildReport {
         let started = Date()
         var report = BuildReport()
@@ -65,6 +67,7 @@ public struct Driver {
         let lock = BuildLock(cacheDir.appendingPathComponent("build.lock"))
         lock.acquire()
         defer { lock.release() }
+        if cancellation?.isCancelled == true { report.cancelled = true; return report }
         try? FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
 
         guard let lualatex else {
@@ -124,7 +127,9 @@ public struct Driver {
 
         if !missing.isEmpty {
             log("fastex: building \(missing.count) figure(s) on \(jobs) cores…")
-            let failures = buildFigures(missing.map { $0.key }, lualatex: lualatex)
+            let failures = buildFigures(missing.map { $0.key }, lualatex: lualatex,
+                                        cancellation: cancellation)
+            if cancellation?.isCancelled == true { report.cancelled = true; return report }
             report.figuresBuilt = missing.count - failures.count
             report.figuresFailed = failures
             var fallbacks = Set(failures)
@@ -139,6 +144,7 @@ public struct Driver {
             }
         }
         report.figureSeconds = Date().timeIntervalSince(figStart)
+        if cancellation?.isCancelled == true { report.cancelled = true; return report }
 
         if figuresOnly {
             report.totalSeconds = Date().timeIntervalSince(started)
@@ -147,12 +153,41 @@ public struct Driver {
 
         // 4. Interactive previews use one pass to show edits sooner. CLI drafts
         //    rerun when cross-references move. Final output always gets two passes.
-        // A stale PDF must not make a failed draft look like a successful one.
-        try? FileManager.default.removeItem(at: draftPDF)
+        // Keep the last complete preview available during a replacement build.
+        // LuaLaTeX writes its PDF progressively, so an interrupted run must not
+        // leave a truncated file in place or lose the old SyncTeX map.
+        let previousPDF = buildDir.appendingPathComponent(".\(jobName).previous.pdf")
+        let previousSync = buildDir.appendingPathComponent(".\(jobName).previous.synctex.gz")
+        let fm = FileManager.default
+        try? fm.removeItem(at: previousPDF)
+        try? fm.removeItem(at: previousSync)
+        let hadPDF = isCompletePDF(draftPDF)
+        if hadPDF {
+            do { try fm.moveItem(at: draftPDF, to: previousPDF) }
+            catch {
+                report.error = "Could not preserve the previous preview: \(error.localizedDescription)"
+                return report
+            }
+        } else { try? fm.removeItem(at: draftPDF) }
+        let savedSync = fm.fileExists(atPath: synctexFile.path)
+            && (try? fm.moveItem(at: synctexFile, to: previousSync)) != nil
+        var keepNewPDF = false
+        defer {
+            if keepNewPDF {
+                try? fm.removeItem(at: previousPDF)
+                try? fm.removeItem(at: previousSync)
+            } else {
+                try? fm.removeItem(at: draftPDF)
+                try? fm.removeItem(at: synctexFile)
+                if hadPDF { try? fm.moveItem(at: previousPDF, to: draftPDF) }
+                if savedSync { try? fm.moveItem(at: previousSync, to: synctexFile) }
+            }
+        }
         var fingerprint = auxFingerprint()
         let passLimit = draft && previewOnly ? 1 : 2
         for pass in 1...passLimit {
-            let r = runTeX(lualatex, pass: pass, onPage: onPage)
+            let r = runTeX(lualatex, pass: pass, cancellation: cancellation, onPage: onPage)
+            if cancellation?.isCancelled == true { report.cancelled = true; return report }
             report.texSeconds += r.duration
             report.passes = pass
             report.texOutput = r.output
@@ -201,6 +236,7 @@ public struct Driver {
         }
         report.pdf = out
         report.totalSeconds = Date().timeIntervalSince(started)
+        keepNewPDF = true
         return report
     }
 
@@ -219,17 +255,23 @@ public struct Driver {
         try? text.write(to: shadowTeX(), atomically: true, encoding: .utf8)
     }
 
-    private func runTeX(_ lualatex: String, pass: Int, onPage: ((Int, Int) -> Void)?) -> RunResult {
+    private func runTeX(_ lualatex: String, pass: Int,
+                        cancellation: BuildCancellation?,
+                        onPage: ((Int, Int) -> Void)?) -> RunResult {
         let args = ["-shell-escape", "-synctex=1",
                     "-interaction=nonstopmode", "-file-line-error", jobName + ".tex"]
         let environment = ["TEXINPUTS": ".:\(projectDir.path):"]
-        guard let onPage else { return Shell.run(lualatex, args, cwd: buildDir, env: environment) }
+        guard let onPage else {
+            return Shell.run(lualatex, args, cwd: buildDir, env: environment,
+                             cancellation: cancellation)
+        }
         var tail = ""
         let pagePattern = try! NSRegularExpression(pattern: #"\[(\d+)\]"#)
         return Shell.run(lualatex,
                   args,
                   cwd: buildDir,
                   env: environment,
+                  cancellation: cancellation,
                   onOutput: { chunk in
                       tail += chunk
                       let ns = tail as NSString
@@ -245,14 +287,17 @@ public struct Driver {
     /// Compile each missing picture in its own process. This is exactly what
     /// tikz's own `main.makefile` does, minus the makefile — which also sidesteps
     /// the library's habit of emitting literal `^^I` instead of tabs.
-    private func buildFigures(_ keys: [String], lualatex: String) -> [String] {
+    private func buildFigures(_ keys: [String], lualatex: String,
+                              cancellation: BuildCancellation?) -> [String] {
         let lock = NSLock()
         var failures: [String] = []
         let sem = DispatchSemaphore(value: max(1, jobs))
         let group = DispatchGroup()
 
         for key in keys {
+            if cancellation?.isCancelled == true { break }
             sem.wait()
+            if cancellation?.isCancelled == true { break }
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 defer { sem.signal(); group.leave() }
@@ -261,7 +306,9 @@ public struct Driver {
                                "-jobname", "figs/f\(key)",
                                "\\def\\tikzexternalrealjob{\(jobName)}\\input{\(jobName)}"],
                               cwd: buildDir,
-                              env: ["TEXINPUTS": ".:\(projectDir.path):"])
+                              env: ["TEXINPUTS": ".:\(projectDir.path):"],
+                              cancellation: cancellation)
+                if cancellation?.isCancelled == true { return }
                 // Judge purely on the artifact: nonstopmode keeps going past errors
                 // raised by other pictures, which say nothing about this one.
                 let ok = isCompletePDF(figPDF(key))

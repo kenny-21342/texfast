@@ -391,10 +391,6 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         startWatching()
         scheduleSymbolRefresh()
 
-        if builder.needsWarmUp {
-            status.stringValue = "First open: building the figure cache (a few minutes, once)"
-            builder.warmUp()
-        }
         builder.build()
 
         if lsp?.isRunning != true {
@@ -412,6 +408,9 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         // unreadable until LuaLaTeX finishes writing it.
         pdfWatcher = FileWatcher(url: builder.pdfURL, interval: 0.6, settle: 0.7) { [weak self] in
             guard let self else { return }
+            // LuaLaTeX replaces its PDF during our own build. Only an external
+            // writer should make the visible preview say EXTERNAL.
+            guard !builder.isBusy else { return }
             preview.reload()
             setPreviewState(editor.hasUnsavedChanges ? .stale : .external)
             status.stringValue = "Preview updated \(Self.clock.string(from: Date()))"

@@ -16,6 +16,7 @@ public enum Shell {
                     _ args: [String],
                     cwd: URL,
                     env extra: [String: String] = [:],
+                    cancellation: BuildCancellation? = nil,
                     onOutput: ((String) -> Void)? = nil) -> RunResult {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: launchPath)
@@ -34,9 +35,14 @@ public enum Shell {
         p.standardError = pipe
 
         let start = Date()
+        if let cancellation, !cancellation.register(p) {
+            return RunResult(status: -1, output: "build cancelled", duration: 0)
+        }
+        defer { cancellation?.unregister(p) }
         do { try p.run() } catch {
             return RunResult(status: 127, output: "failed to launch \(launchPath): \(error)", duration: 0)
         }
+        cancellation?.didLaunch(p)
         // Drain concurrently so a chatty child cannot deadlock on a full pipe.
         var data = Data()
         let q = DispatchQueue(label: "drain")
@@ -53,7 +59,7 @@ public enum Shell {
         p.waitUntilExit()
         done.wait()
 
-        return RunResult(status: p.terminationStatus,
+        return RunResult(status: cancellation?.isCancelled == true ? -1 : p.terminationStatus,
                          output: String(data: data, encoding: .utf8) ?? "",
                          duration: Date().timeIntervalSince(start))
     }
