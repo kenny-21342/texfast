@@ -3,7 +3,7 @@ import TexFastCore
 
 func usage() -> Never {
     print("""
-    fastex — a fast incremental build driver for XeLaTeX documents
+    fastex — a fast incremental build driver for LuaLaTeX documents
 
     USAGE
       fastex build [--final|--preview] [-j N] <file.tex>
@@ -12,7 +12,7 @@ func usage() -> Never {
       fastex clean <file.tex>                    drop the cache
 
     Draft builds downsample raster images to cached JPEGs and reuse externalized
-    TikZ figures; the PDF stays in .texfast/build/. --final uses the original
+    TikZ figures; the PDF stays in .texfast/build-lualatex/. --final uses the original
     images, runs two passes and writes the PDF next to the source. --preview
     uses one pass for a faster draft. The source is never modified.
     """)
@@ -73,8 +73,8 @@ case "warm", "build":
     log("fastex: " + bits.joined(separator: ", "))
 
     if command == "build" {
-        log(String(format: "fastex: tex %@ · pdf %@ · %d pass(es)",
-                   fmt(r.texSeconds), fmt(r.pdfSeconds), r.passes))
+        log(String(format: "fastex: tex %@ · %d pass(es)",
+                   fmt(r.texSeconds), r.passes))
         log("fastex: total \(fmt(r.totalSeconds))")
         if let pdf = r.pdf { print(pdf.path) }
     } else {

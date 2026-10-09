@@ -12,7 +12,6 @@ public struct BuildReport {
     public var error: String?
     public var texSeconds = 0.0
     public var figureSeconds = 0.0
-    public var pdfSeconds = 0.0
     public var totalSeconds = 0.0
     /// Compiler output is retained for the editor's clickable Problems list.
     public var texOutput = ""
@@ -41,17 +40,17 @@ public struct Driver {
     public var shadowFile: URL { buildDir.appendingPathComponent(jobName + ".tex") }
     public var synctexFile: URL { buildDir.appendingPathComponent(jobName + ".synctex.gz") }
 
-    public var buildDir: URL { cacheDir.appendingPathComponent("build") }
+    // Keep LuaLaTeX's auxiliary files and figure PDFs separate from XeLaTeX's.
+    public var buildDir: URL { cacheDir.appendingPathComponent("build-lualatex") }
     var figDir: URL { buildDir.appendingPathComponent("figs") }
     var imgDir: URL { cacheDir.appendingPathComponent("img") }
-    var blocklistFile: URL { cacheDir.appendingPathComponent("blocked-figures.txt") }
+    var blocklistFile: URL { cacheDir.appendingPathComponent("blocked-figures-lualatex.txt") }
     /// stderr is invisible when the app is launched from Finder, so every build
     /// leaves its output here.
     public var buildLog: URL { cacheDir.appendingPathComponent("build.log") }
     var jobName: String { texFile.deletingPathExtension().lastPathComponent }
 
-    private var xelatex: String? { Shell.which("xelatex") }
-    private var xdvipdfmx: String? { Shell.which("xdvipdfmx") }
+    private var lualatex: String? { Shell.which("lualatex") }
 
     // MARK: - entry points
 
@@ -61,15 +60,15 @@ public struct Driver {
         var report = BuildReport()
 
         try? FileManager.default.createDirectory(at: figDir, withIntermediateDirectories: true)
-        // Two builds sharing one build directory corrupt each other's .xdv —
+        // Two builds sharing one build directory corrupt each other's output —
         // the app and a `fastex` run in a terminal, say. Serialise them.
         let lock = BuildLock(cacheDir.appendingPathComponent("build.lock"))
         lock.acquire()
         defer { lock.release() }
         try? FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
 
-        guard let xelatex, let xdvipdfmx else {
-            report.error = "xelatex/xdvipdfmx not found on PATH"
+        guard let lualatex else {
+            report.error = "lualatex not found on PATH"
             return report
         }
         guard let source = try? String(contentsOf: texFile, encoding: .utf8) else {
@@ -118,14 +117,14 @@ public struct Driver {
         var missing = draft ? scan.pictures : []
         missing = missing
             .filter { !blocked.contains($0.key) }
-            .filter { !FileManager.default.fileExists(atPath: figPDF($0.key).path) }
+            .filter { !isCompletePDF(figPDF($0.key)) }
         // A picture repeated verbatim hashes the same; build it once.
         missing = dedupe(missing)
         report.figuresCached = draft ? (scan.pictures.count - missing.count - blocked.count) : 0
 
         if !missing.isEmpty {
             log("fastex: building \(missing.count) figure(s) on \(jobs) cores…")
-            let failures = buildFigures(missing.map { $0.key }, xelatex: xelatex)
+            let failures = buildFigures(missing.map { $0.key }, lualatex: lualatex)
             report.figuresBuilt = missing.count - failures.count
             report.figuresFailed = failures
             var fallbacks = Set(failures)
@@ -148,18 +147,20 @@ public struct Driver {
 
         // 4. Interactive previews use one pass to show edits sooner. CLI drafts
         //    rerun when cross-references move. Final output always gets two passes.
+        // A stale PDF must not make a failed draft look like a successful one.
+        try? FileManager.default.removeItem(at: draftPDF)
         var fingerprint = auxFingerprint()
         let passLimit = draft && previewOnly ? 1 : 2
         for pass in 1...passLimit {
-            let r = runTeX(xelatex, pass: pass, onPage: onPage)
+            let r = runTeX(lualatex, pass: pass, onPage: onPage)
             report.texSeconds += r.duration
             report.passes = pass
             report.texOutput = r.output
             report.texHadErrors = report.texHadErrors || r.status != 0
-            if r.status != 0 && (!draft || !FileManager.default.fileExists(atPath: xdvPath().path)) {
+            if r.status != 0 && (!draft || !isCompletePDF(draftPDF)) {
                 appendLog(r.output)
                 report.error = lastErrors(from: r.output).isEmpty
-                    ? "xelatex failed — see \(buildDir.appendingPathComponent(jobName + ".log").path)"
+                    ? "lualatex failed — see \(buildDir.appendingPathComponent(jobName + ".log").path)"
                     : lastErrors(from: r.output)
                 return report
             }
@@ -172,27 +173,15 @@ public struct Driver {
             }
         }
 
-        // 5. xdv -> pdf
-        var pdfRun = Shell.run(xdvipdfmx, ["-q", "-o", jobName + ".pdf", jobName + ".xdv"], cwd: buildDir)
-        if pdfRun.status != 0 {
-            // A build killed part-way leaves a truncated .xdv, and every later
-            // build then fails on it. Regenerate it once before giving up.
-            appendLog("xdvipdfmx failed, regenerating the .xdv and retrying:\n" + pdfRun.output)
-            try? FileManager.default.removeItem(at: xdvPath())
-            let retry = runTeX(xelatex, pass: report.passes + 1, onPage: onPage)
-            report.texSeconds += retry.duration
-            pdfRun = Shell.run(xdvipdfmx, ["-q", "-o", jobName + ".pdf", jobName + ".xdv"], cwd: buildDir)
-        }
-        report.pdfSeconds = pdfRun.duration
-        if pdfRun.status != 0 {
-            appendLog(pdfRun.output)
-            report.error = "xdvipdfmx failed — see \(buildLog.path)"
+        // LuaLaTeX writes the PDF directly; there is no XDV conversion step.
+        guard isCompletePDF(draftPDF) else {
+            report.error = "lualatex did not produce a PDF — see \(buildLog.path)"
             return report
         }
 
         var out = buildDir.appendingPathComponent(jobName + ".pdf")
         if !draft {
-            // Only a lossless build is allowed to land next to the source.
+            // Only a build using original images is allowed next to the source.
             let final = projectDir.appendingPathComponent(jobName + ".pdf")
             let temporary = projectDir.appendingPathComponent(".\(jobName).texfast-final.pdf")
             do {
@@ -221,7 +210,7 @@ public struct Driver {
         // A final build externalizes nothing: an externalized figure carries a
         // tight bounding box, which nudges the spacing of side-by-side figures
         // by a fraction of a point. Invisible in a draft, but the handed-in PDF
-        // should match a stock xelatex run exactly.
+        // should match a stock lualatex run exactly.
         let opts = ShadowSource.Options(externalize: draft,
                                         figPrefix: "figs/",
                                         imageRewrites: rewrites,
@@ -230,14 +219,14 @@ public struct Driver {
         try? text.write(to: shadowTeX(), atomically: true, encoding: .utf8)
     }
 
-    private func runTeX(_ xelatex: String, pass: Int, onPage: ((Int, Int) -> Void)?) -> RunResult {
-        let args = ["-shell-escape", "-no-pdf", "-synctex=1",
+    private func runTeX(_ lualatex: String, pass: Int, onPage: ((Int, Int) -> Void)?) -> RunResult {
+        let args = ["-shell-escape", "-synctex=1",
                     "-interaction=nonstopmode", "-file-line-error", jobName + ".tex"]
         let environment = ["TEXINPUTS": ".:\(projectDir.path):"]
-        guard let onPage else { return Shell.run(xelatex, args, cwd: buildDir, env: environment) }
+        guard let onPage else { return Shell.run(lualatex, args, cwd: buildDir, env: environment) }
         var tail = ""
         let pagePattern = try! NSRegularExpression(pattern: #"\[(\d+)\]"#)
-        return Shell.run(xelatex,
+        return Shell.run(lualatex,
                   args,
                   cwd: buildDir,
                   env: environment,
@@ -256,7 +245,7 @@ public struct Driver {
     /// Compile each missing picture in its own process. This is exactly what
     /// tikz's own `main.makefile` does, minus the makefile — which also sidesteps
     /// the library's habit of emitting literal `^^I` instead of tabs.
-    private func buildFigures(_ keys: [String], xelatex: String) -> [String] {
+    private func buildFigures(_ keys: [String], lualatex: String) -> [String] {
         let lock = NSLock()
         var failures: [String] = []
         let sem = DispatchSemaphore(value: max(1, jobs))
@@ -267,7 +256,7 @@ public struct Driver {
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 defer { sem.signal(); group.leave() }
-                _ = Shell.run(xelatex,
+                _ = Shell.run(lualatex,
                               ["-shell-escape", "-interaction=nonstopmode",
                                "-jobname", "figs/f\(key)",
                                "\\def\\tikzexternalrealjob{\(jobName)}\\input{\(jobName)}"],
@@ -275,7 +264,7 @@ public struct Driver {
                               env: ["TEXINPUTS": ".:\(projectDir.path):"])
                 // Judge purely on the artifact: nonstopmode keeps going past errors
                 // raised by other pictures, which say nothing about this one.
-                let ok = FileManager.default.fileExists(atPath: figPDF(key).path)
+                let ok = isCompletePDF(figPDF(key))
                 if !ok {
                     lock.lock(); failures.append(key); lock.unlock()
                 }
@@ -354,8 +343,14 @@ public struct Driver {
     }
 
     private func shadowTeX() -> URL { buildDir.appendingPathComponent(jobName + ".tex") }
-    private func xdvPath() -> URL { buildDir.appendingPathComponent(jobName + ".xdv") }
     private func figPDF(_ key: String) -> URL { figDir.appendingPathComponent("f\(key).pdf") }
+
+    /// An interrupted compiler can leave an empty or truncated PDF behind.
+    private func isCompletePDF(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.starts(with: Data("%PDF-".utf8)) else { return false }
+        return Data(data.suffix(1024)).range(of: Data("%%EOF".utf8)) != nil
+    }
 
     private func auxFingerprint() -> String {
         var parts: [String] = []

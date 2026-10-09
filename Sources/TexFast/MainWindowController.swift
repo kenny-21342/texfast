@@ -409,7 +409,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         sourceWatcher?.start()
 
         // A little more settle time: the PDF is written progressively and is
-        // unreadable until xdvipdfmx is done.
+        // unreadable until LuaLaTeX finishes writing it.
         pdfWatcher = FileWatcher(url: builder.pdfURL, interval: 0.6, settle: 0.7) { [weak self] in
             guard let self else { return }
             preview.reload()
@@ -461,7 +461,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         case .current:
             (label, color, tip) = ("CURRENT", .systemGreen, "The latest preview build completed without TeX errors")
         case .issues:
-            (label, color, tip) = ("ISSUES", .systemOrange, "XeLaTeX produced a PDF with errors; it may be incomplete")
+            (label, color, tip) = ("ISSUES", .systemOrange, "LuaLaTeX produced a PDF with errors; it may be incomplete")
         case .failed:
             (label, color, tip) = ("FAILED", .systemRed, "The last build failed; the visible PDF is older")
         case .external:
@@ -498,7 +498,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
                                            message: error, origin: "Build"), at: 0)
         } else if result.texHadErrors && !compileProblems.contains(where: { $0.severity == 1 }) {
             compileProblems.insert(Problem(url: nil, line: nil, severity: 1,
-                                           message: "XeLaTeX reported errors; inspect the build log.",
+                                           message: "LuaLaTeX reported errors; inspect the build log.",
                                            origin: "Build"), at: 0)
         }
         refreshProblems()

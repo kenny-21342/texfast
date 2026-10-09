@@ -2,7 +2,7 @@
 # Assemble TexFast.app from the SwiftPM build product.
 set -e
 cd "$(dirname "$0")"
-xcrun --toolchain default swift build -c release
+xcrun --toolchain default swift build -c release "$@"
 APP="TexFast.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -21,7 +21,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>TexFast</string>
   <key>CFBundleIconFile</key><string>TexFast</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleShortVersionString</key><string>1.1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleDocumentTypes</key>

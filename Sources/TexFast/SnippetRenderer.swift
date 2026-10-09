@@ -4,7 +4,7 @@ import CryptoKit
 import TexFastCore
 
 /// Compiles one hovered construct in isolation. Jobs are serial and cancellable;
-/// a new hover never starts a second XeLaTeX process beside the first one.
+/// a new hover never starts a second LuaLaTeX process beside the first one.
 final class SnippetRenderer {
     private let queue = DispatchQueue(label: "TexFast.snippet-render", qos: .userInitiated)
     private let lock = NSLock()
@@ -53,8 +53,8 @@ final class SnippetRenderer {
 
     private func compile(snippet: String, source: String, project: URL,
                          request: Int) -> (image: CGImage?, message: String?) {
-        guard let xelatex = Shell.which("xelatex") else {
-            return (nil, "XeLaTeX is needed for snippet previews")
+        guard let lualatex = Shell.which("lualatex") else {
+            return (nil, "LuaLaTeX is needed for snippet previews")
         }
         let preamble: String
         if let begin = source.range(of: #"\\begin\s*\{document\}"#, options: .regularExpression) {
@@ -95,7 +95,7 @@ final class SnippetRenderer {
         defer { try? output.close() }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: xelatex)
+        process.executableURL = URL(fileURLWithPath: lualatex)
         process.arguments = ["-no-shell-escape", "-halt-on-error", "-interaction=nonstopmode",
                              "-output-directory=\(directory.path)", input.path]
         // TeX's own \openout writes stay in this disposable directory. Search
@@ -114,7 +114,7 @@ final class SnippetRenderer {
         lock.unlock()
         do { try process.run() } catch {
             clear(process)
-            return (nil, "Could not start XeLaTeX")
+            return (nil, "Could not start LuaLaTeX")
         }
         if !isCurrent(request), process.isRunning { process.terminate() }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {

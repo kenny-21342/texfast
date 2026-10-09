@@ -5,10 +5,7 @@ import UniformTypeIdentifiers
 
 /// Content-addressed cache of downsampled JPEGs.
 ///
-/// The whole point is `xdvipdfmx`'s DCTDecode passthrough: a JPEG is copied into
-/// the PDF verbatim, while every PNG is inflated and re-deflated on each run.
-/// On the IB Physics notes that difference is 22 s -> 0.8 s in the PDF-writing
-/// phase, which is most of the speedup.
+/// Drafts can use smaller cached images; finals always use the original files.
 struct ImageCache {
     let dir: URL
     let maxEdge: Int

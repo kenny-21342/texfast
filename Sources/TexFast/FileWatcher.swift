@@ -7,7 +7,7 @@ import Foundation
 /// it over the original. That replaces the inode, so a vnode watch on the
 /// original file descriptor goes deaf after the first save.
 ///
-/// The settle delay matters just as much: `xdvipdfmx` writes a 5 MB PDF
+/// The settle delay matters just as much: LuaLaTeX writes a PDF
 /// progressively, and reloading halfway through yields a truncated document.
 /// A change is only reported once size and mtime have held still.
 final class FileWatcher {

@@ -13,7 +13,7 @@ struct Problem {
     }
 }
 
-/// Parses the file:line:message format produced by XeLaTeX's
+/// Parses the file:line:message format produced by LuaLaTeX's
 /// -file-line-error option. The main file in the output is the shadow copy;
 /// included files are resolved against the project directory.
 enum BuildProblems {
