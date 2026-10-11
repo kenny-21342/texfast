@@ -12,7 +12,7 @@ cp .build/release/{TexFast,fastex} "$APP/Contents/MacOS/"
 cp .build/realtime-engine/bin/rtex "$APP/Contents/MacOS/"
 cp -R .build/realtime-engine/share/rtex/tex "$APP/Contents/Resources/rtex/"
 cp Resources/RealtimePreview/{index.html,preview.css,preview.js} "$APP/Contents/Resources/RealtimePreview/"
-cp Resources/TexFast.icns "$APP/Contents/Resources/"
+cp Resources/TexFastRealtime.icns "$APP/Contents/Resources/"
 cp .build/checkouts/SwiftTerm/LICENSE "$APP/Contents/Resources/SwiftTerm-LICENSE.txt"
 cp .build/realtime-engine/LICENSE "$APP/Contents/Resources/realtime-tex-LICENSE.txt"
 cp RealtimePreview/vendor/LICENSE "$APP/Contents/Resources/realtime-tex-vsc-plugin-LICENSE.txt"
@@ -28,10 +28,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>TexFast Realtime</string>
 <key>CFBundleIdentifier</key><string>com.kenny-lhs.texfast.realtime</string>
 <key>CFBundleExecutable</key><string>TexFast</string>
-<key>CFBundleIconFile</key><string>TexFast</string>
+<key>CFBundleIconFile</key><string>TexFastRealtime</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.2.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleDocumentTypes</key><array><dict>
