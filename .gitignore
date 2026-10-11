@@ -3,3 +3,9 @@ TexFast.app/
 .DS_Store
 CLAUDE.md
 .texfast/
+TexFast Realtime.app/
+RealtimePreview/node_modules/
+Resources/RealtimePreview/preview.js
+Resources/RealtimePreview/pdf.worker.mjs
+releases/
+Resources/RealtimePreview/index.html

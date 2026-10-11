@@ -16,6 +16,8 @@ final class BuildController {
     private var activeRevision = -1
     private var currentCancellation: BuildCancellation?
 
+    var onPreviewRequested: (() -> Bool)?
+
     var onState: ((State, String) -> Void)?
     var onFinished: ((BuildReport?) -> Void)?
 
@@ -38,6 +40,7 @@ final class BuildController {
 
     func build() {
         if renderingFinal { return }
+        if onPreviewRequested?() == true { return }
         if running {
             if sourceRevision == activeRevision { return }
             pendingRebuild = true

@@ -112,6 +112,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
 
     private var lsp: LSPClient?
     private var builder: BuildController!
+    private var realtime: RealtimeController?
+    private var livePreview: RealtimePreviewController?
     private var fileURL: URL!
     private var symbolWork: DispatchWorkItem?
     private var sourceWatcher: FileWatcher?
@@ -342,9 +344,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         editor.onAutoSaveBlocked = { [weak self] in
             self?.status.stringValue = "\(self?.fileURL.lastPathComponent ?? "The file") changed on disk — auto-compile paused, ⌘S to overwrite"
         }
-        editor.onTextChanged = { [weak self] _ in
+        editor.onTextChanged = { [weak self] text in
             guard let self else { return }
             builder.sourceDidChange()
+            if editor.autoCompile, let url = editor.fileURL { realtime?.update(url: url, text: text) }
             setPreviewState(.stale)
             if !compileProblems.isEmpty { compileProblems = []; refreshProblems() }
             if !editor.autoCompile { scheduleSymbolRefresh() }
@@ -391,11 +394,69 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         startWatching()
         scheduleSymbolRefresh()
 
+        startRealtime()
         builder.build()
 
         if lsp?.isRunning != true {
             status.stringValue = "texlab not found — completion is off. Install with: brew install texlab"
         }
+    }
+
+    private func startRealtime() {
+        let engine = RealtimeController(main: fileURL)
+        let renderer = RealtimePreviewController()
+        engine.onMessage = { [weak renderer] value in renderer?.post(value) }
+        engine.onStatus = { [weak self] message, busy, issues in
+            guard let self else { return }
+            status.stringValue = message
+            if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+            setPreviewState(issues ? .issues : busy ? .building : .current)
+        }
+        engine.onDiagnostics = { [weak self] problems in
+            self?.compileProblems = problems; self?.refreshProblems()
+        }
+        engine.onFailure = { [weak self] reason in self?.realtimeFailed(reason) }
+        renderer.onFailure = { [weak self] reason in self?.realtimeFailed(reason) }
+        renderer.onCommand = { [weak self] command in
+            guard let self else { return }
+            switch command {
+            case "realtimeTex.recompile", "realtimeTex.restart":
+                engine.refresh(activeURL: editor.fileURL, text: editor.textView.string, forceLayout: true)
+            case "realtimeTex.exportPdf":
+                // Final export uses the same clean original-source build as quitting.
+                guard editor.save() else { return }
+                builder.buildFinal(onPage: { _, _, _ in }, finished: { [weak self] result in
+                    guard let self else { return }
+                    updateCompileProblems(from: result)
+                    if let pdf = result.pdf { NSWorkspace.shared.open(pdf) }
+                })
+            default: break
+            }
+        }
+        renderer.onJump = { page, x, y in engine.jump(page: page, x: x, y: y) }
+        engine.onSourceLocation = { [weak self] url, line in
+            guard let self, openSource(url) else { return }
+            editor.jump(toLine: line)
+            window?.makeFirstResponder(editor.textView)
+        }
+        realtime = engine; livePreview = renderer
+        engine.start()
+        guard engine.available else { realtime = nil; livePreview = nil; return }
+        preview.showRealtime(renderer)
+        builder.onPreviewRequested = { [weak self] in
+            guard let self, let realtime, realtime.available else { return false }
+            realtime.refresh(activeURL: editor.fileURL, text: editor.textView.string, forceLayout: true)
+            return true
+        }
+    }
+
+    private func realtimeFailed(_ reason: String) {
+        guard realtime != nil else { return }
+        realtime?.stop(); realtime = nil; livePreview = nil
+        preview.hideRealtime()
+        builder.onPreviewRequested = nil
+        builder.build()
+        status.stringValue = "Realtime unavailable; using PDF preview. \(reason)"
     }
 
     /// Keep both panes in step with whatever else is touching the project — a
@@ -613,6 +674,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     }
 
     private func forwardSync(line: Int, column: Int) {
+        if let realtime {
+            realtime.reveal(url: editor.fileURL ?? fileURL, line: line)
+            return
+        }
         let shadow = builder.shadowURL
         let pdf = builder.pdfURL
         let activeSource = editor.fileURL ?? fileURL!
@@ -633,7 +698,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         UserDefaults.standard.set(enabled, forKey: autoCompileDefaultsKey)
         updateModeLabel()
         status.stringValue = enabled
-            ? "Auto-compile on — builds when you stop typing"
+            ? "Auto-compile on — realtime preview while typing"
             : "Auto-compile off — ⌘S to build"
     }
 
@@ -734,6 +799,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     }
 
     func shutDown() {
+        realtime?.stop()
         terminalController?.stop()
         sourceWatcher?.stop()
         pdfWatcher?.stop()

@@ -65,7 +65,7 @@ final class AboutViewController: NSViewController {
 
         let appIcon = NSImageView(image: NSApp.applicationIconImage)
         appIcon.imageScaling = .scaleProportionallyUpOrDown
-        let title = NSTextField(labelWithString: "TexFast")
+        let title = NSTextField(labelWithString: Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "TexFast")
         title.font = .systemFont(ofSize: 30, weight: .bold)
         let tagline = NSTextField(labelWithString: "Write in TeX. See the page.")
         tagline.font = .systemFont(ofSize: 15, weight: .medium)
@@ -81,7 +81,9 @@ final class AboutViewController: NSViewController {
                                      detail: "Move between TeX source and the PDF with a click.")
         let preview = AboutFeatureRow(symbol: "bolt",
                                       title: "Preview while you write",
-                                      detail: "Quick draft builds, with a two-pass final PDF on quit.")
+                                      detail: Bundle.main.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String == "com.kenny-lhs.texfast.realtime"
+                                        ? "Live paragraph updates, with a clean final PDF on quit."
+                                        : "Quick draft builds, with a two-pass final PDF on quit.")
         let terminal = AboutFeatureRow(symbol: "terminal",
                                        title: "Work beside your document",
                                        detail: "Run a project shell or coding agent in the built-in terminal.")
@@ -158,8 +160,12 @@ final class AboutViewController: NSViewController {
     }
 
     @objc private func openLicenses(_ sender: Any?) {
-        guard let url = Bundle.main.url(forResource: "SwiftTerm-LICENSE", withExtension: "txt") else { return }
-        NSWorkspace.shared.open(url)
+        guard let directory = Bundle.main.resourceURL else { return }
+        if FileManager.default.fileExists(atPath: directory.appendingPathComponent("realtime-tex-LICENSE.txt").path) {
+            NSWorkspace.shared.open(directory)
+        } else if let url = Bundle.main.url(forResource: "SwiftTerm-LICENSE", withExtension: "txt") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 

@@ -7,6 +7,7 @@ final class PDFPaneController: NSViewController {
 
     let pdfView = PDFView()
     private var url: URL?
+    private var realtimePreview: RealtimePreviewController?
     /// Clicking a PDF page asks the editor to jump to the matching source line.
     var onReverseSync: ((SourceLocation) -> Void)?
     var onPageChanged: ((Int, Int) -> Void)?
@@ -39,6 +40,21 @@ final class PDFPaneController: NSViewController {
         ) { [weak self] _ in self?.reportPage() }
     }
 
+    func showRealtime(_ controller: RealtimePreviewController) {
+        _ = view
+        realtimePreview = controller
+        addChild(controller)
+        controller.view.frame = view.bounds
+        controller.view.autoresizingMask = [.width, .height]
+        view.addSubview(controller.view)
+    }
+
+    func hideRealtime() {
+        realtimePreview?.view.removeFromSuperview()
+        realtimePreview?.removeFromParent()
+        realtimePreview = nil
+    }
+
     func load(_ url: URL) {
         self.url = url
         reload()
@@ -65,6 +81,11 @@ final class PDFPaneController: NSViewController {
 
     /// Scroll to a SyncTeX hit and flash it, so the eye lands in the right place.
     func reveal(_ location: PDFLocation) {
+        if let realtimePreview {
+            realtimePreview.post(["type": "reveal", "page": location.page,
+                                  "x": location.x * 65781.76, "y": location.y * 65781.76, "force": true])
+            return
+        }
         guard let document = pdfView.document,
               location.page >= 1, location.page <= document.pageCount,
               let page = document.page(at: location.page - 1) else { return }
@@ -100,7 +121,7 @@ final class PDFPaneController: NSViewController {
     }
 
     private func handleClick(at point: NSPoint) {
-        guard let url else { return }
+        guard realtimePreview == nil, let url else { return }
         guard let page = pdfView.page(for: point, nearest: false),
               let document = pdfView.document else { return }
         let pageIndex = document.index(for: page)

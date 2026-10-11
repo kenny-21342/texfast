@@ -1,4 +1,33 @@
-# TexFast
+# TexFast Realtime — alternative release
+
+This `realtime-tex` branch integrates [realtime-tex v0.0.7](https://github.com/kenny-21342/realtime-tex/releases/tag/v0.0.7) into the native editor. The Rust library runs through its supported persistent `rtex serve` API; the preview uses the display-list renderer from [realtime-tex-vsc-plugin](https://github.com/kenny-21342/realtime-tex-vsc-plugin).
+
+Download **TexFast-Realtime-v1.2.0-realtime.1-macOS-arm64.zip** from the [alternative release](https://github.com/kenny-21342/texfast/releases/tag/v1.2.0-realtime.1). It contains **TexFast Realtime.app**, with a separate app identifier and settings so it can coexist with TexFast. This build is for Apple Silicon and requires macOS 13+ and **TeX Live 2026** with LuaLaTeX. The engine and renderer are bundled; Rust, Node.js, and VS Code are unnecessary to run it. The app is ad-hoc signed, without notarization.
+
+With auto-compile enabled, edits are sent directly from the unsaved editor buffer to the persistent engine. Eligible paragraphs update from display lists immediately; after a 350 ms typing pause, a background pass reconciles page breaks, counters, references, and other layout changes. Included `.tex` files are supported. The status shows pending layouts, convergence, and compiler errors; unsupported drawing uses the engine’s background PDF. Actual latency depends on the document and TeX fonts.
+
+Click the live preview to navigate to a source unit; `⌘J` and outline navigation use rtex paragraph placements. This navigation is at the unit level rather than character-level SyncTeX. The preview toolbar can recompile or export. Export and quitting use TexFast’s existing clean two-pass build from the saved original source. If the engine or renderer exits, the editor falls back to its existing PDF preview. Turning auto-compile off pauses sending edits until `⌘S`.
+
+To build the alternative app:
+
+```sh
+./make-realtime-app.sh
+```
+
+The script downloads a pinned, SHA-256-verified engine release for the build machine, installs the locked renderer dependencies, builds Swift, and signs the separate bundle. The default branch’s `./make-app.sh` workflow remains available. Source builds require Node.js/npm as well as Xcode tools. Renderer provenance and license are in `RealtimePreview/vendor/PROVENANCE.md`; all runtime dependency licenses are bundled.
+
+Validation:
+
+```sh
+xcrun --toolchain default swift test
+python3 scripts/test-realtime-engine.py
+./scripts/test-realtime-webkit.sh  # after building TexFast Realtime.app; opens a disposable window
+```
+
+The engine test checks live edits, included-file UTF-8 edits, convergence, export, and source safety. The WebKit test runs the actual Swift bridge and renderer, checks painted canvas pixels and live updates, and saves `.build/realtime-preview-smoke.png`.
+
+The following documents the standard TexFast pipeline retained for fallback and final output.
+
 
 TexFast is a native macOS LaTeX editor with a LuaLaTeX preview loop. It pairs a source editor and PDF viewer with `fastex`, a command-line build driver that caches expensive figures and images during drafting. Final builds use the original assets and two LuaLaTeX passes.
 
