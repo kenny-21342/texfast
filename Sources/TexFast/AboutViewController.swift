@@ -82,7 +82,7 @@ final class AboutViewController: NSViewController {
         let preview = AboutFeatureRow(symbol: "bolt",
                                       title: "Preview while you write",
                                       detail: Bundle.main.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String == "com.kenny-lhs.texfast.realtime"
-                                        ? "Live paragraph updates, with a clean final PDF on quit."
+                                        ? "Native PDF preview from a persistent realtime TeX engine."
                                         : "Quick draft builds, with a two-pass final PDF on quit.")
         let terminal = AboutFeatureRow(symbol: "terminal",
                                        title: "Work beside your document",

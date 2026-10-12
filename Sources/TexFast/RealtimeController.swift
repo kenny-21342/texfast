@@ -2,7 +2,7 @@ import Foundation
 import TexFastCore
 
 /// Owns one persistent Rust Session through its supported JSON-lines host API.
-/// All process I/O, source snapshots and resource loading use a serial queue.
+/// Process I/O, source snapshots and complete PDF snapshots use a serial queue.
 final class RealtimeController {
     let root: URL
     let main: URL
@@ -14,21 +14,19 @@ final class RealtimeController {
     private var errorPipe: Pipe?
     private var buffer = Data()
     private var documents: [String: String] = [:]
-    private var sentFonts = Set<String>()
-    private var sentImages = Set<String>()
-    private var located: [String: URL] = [:]
-    private var fontMap: [String: String]?
     private var spans: [String: [[String: Any]]] = [:]
     private var spanRequests: [String] = []
     private var placements: [[String: Any]] = []
     private var engineFiles = Set<String>()
     private var revision = 1
+    private var publishedRevision = 0
     private var stopping = false
     private var layoutWork: DispatchWorkItem?
     private var stderrTail = ""
     private var diagnostics: [String: [Problem]] = [:]
     private(set) var available = false
-    var onMessage: (([String: Any]) -> Void)?
+    var onPDF: ((Data, Int, Int) -> Void)?
+    var onReveal: ((PDFLocation) -> Void)?
     var onStatus: ((String, Bool, Bool) -> Void)?
     var onDiagnostics: (([Problem]) -> Void)?
     var onSourceLocation: ((URL, Int) -> Void)?
@@ -98,7 +96,6 @@ final class RealtimeController {
         queue.async { [weak self] in
             guard let self, !stopping else { return }
             let active = activeURL?.resolvingSymlinksInPath()
-            sentImages.removeAll()
             let urls = sourceURLs()
             for url in urls where url != active {
                 if let value = try? String(contentsOf: url, encoding: .utf8) { updateBuffer(url: url, text: value) }
@@ -128,7 +125,9 @@ final class RealtimeController {
                       let fragment = (placement["fragments"] as? [[String: Any]])?.first,
                       let page = fragment["page"] as? Int,
                       let y = (fragment["baselines"] as? [Double])?.first else { continue }
-                message(["type": "reveal", "page": page, "x": fragment["x"] ?? 0, "y": y, "force": true])
+                let location = PDFLocation(page: page, x: (fragment["x"] as? Double ?? 0) / 65781.76,
+                                           y: y / 65781.76, width: 24, height: 12)
+                DispatchQueue.main.async { [weak self] in self?.onReveal?(location) }
                 return
             }
         }
@@ -254,9 +253,10 @@ final class RealtimeController {
             let compile = event["compile"] as? [String: Any] ?? [:]
             let convergence = event["convergence"] as? [String: Any] ?? [:]
             let state = convergence["state"] as? String ?? "Stale"
+            // PDFKit shows complete layouts. Obsolete passes never replace the latest PDF.
+            guard eventRevision >= revision else { return }
             if compile["state"] as? String == "Failed" {
-                message(["type": "banner", "kind": "error", "text": "The realtime compile failed. The preview keeps its last good pages. Check Problems or the LuaLaTeX log."])
-                status("Realtime compile failed", busy: false, issues: true)
+                status("Realtime compile failed · keeping the last good PDF", busy: false, issues: true)
                 return
             }
             placements = event["placements"] as? [[String: Any]] ?? []
@@ -264,35 +264,31 @@ final class RealtimeController {
                 spanRequests.append(path)
                 send(["cmd": "spans", "path": path])
             }
-            let pages = event["pages_changed"] as? [[String: Any]] ?? []
-            resources(for: pages.compactMap { $0["dl"] as? [String: Any] })
             let version = versions["layout_version"] as? Int ?? 0
-            let fallback = (event["pdf_fallback"] as? String).map { URL(fileURLWithPath: $0) }
+            let pdfURL = (event["pdf_fallback"] as? String).map { URL(fileURLWithPath: $0) }
                 ?? buildDirectory.appendingPathComponent("bg/layout-\(version).pdf")
-            let pdf = (try? Data(contentsOf: fallback))?.base64EncodedString()
-            let keep: Any = eventRevision < revision ? eventRevision + 1 : (state == "Stale" ? (convergence["pending_since"] ?? revision) : NSNull())
-            message(["type": "layout", "pages": pages, "pagesTotal": event["pages_total"] ?? 0,
-                     "placements": event["placements"] ?? [], "keepFromRevision": keep, "pdf": pdf as Any? ?? NSNull()])
-            let held = event["held"] as? [[String: Any]] ?? []
-            message(["type": "held", "units": held.map { ["parId": $0["par_id"] ?? 0, "line": $0["line"] ?? NSNull()] }])
-            message(["type": "banner", "text": NSNull()])
+            // Copy the complete stable PDF now: rtex eventually prunes older layout files.
+            guard let data = try? Data(contentsOf: pdfURL), !data.isEmpty else {
+                status("Realtime PDF unavailable · keeping the last good preview", busy: false, issues: true)
+                return
+            }
+            publishedRevision = eventRevision
+            DispatchQueue.main.async { [weak self] in
+                guard let self, available else { return }
+                onPDF?(data, eventRevision, version)
+            }
             let issues = compile["state"] as? String != "Ok" || state == "PassLimitReached"
             let current = eventRevision >= revision && state == "Converged"
             status(current ? "Realtime · layout converged" : "Realtime · \(state.lowercased())", busy: !current && !issues, issues: issues)
         case "ParagraphUpdate":
+            guard eventRevision > publishedRevision else { return }
             let statusValue = event["status"] as? String ?? ""
-            if statusValue == "error" { status("Realtime · keeping last good paragraph", busy: true, issues: true); return }
-            guard let dl = event["dl"] as? [String: Any] else { return }
-            if let id = event["par_id"] as? Int {
-                placements.removeAll { $0["par_id"] as? Int == id }
-                if statusValue != "removed" { placements.append(["par_id": id, "fragments": event["fragments"] ?? []]) }
-            }
-            resources(for: [dl])
-            message(["type": "paragraph", "parId": event["par_id"] ?? 0, "dl": dl,
-                     "native": event["native"] ?? NSNull(), "fragments": statusValue == "removed" ? [] : event["fragments"] ?? [], "revision": eventRevision])
+            if statusValue == "error" { status("Realtime · source has errors · keeping the last good PDF", busy: true, issues: true); return }
+            // Fast results acknowledge the edit; they are not PDFs. Preserve the PDF's
+            // placements until the background pass delivers the matching complete layout.
             let timing = event["timing"] as? [String: Any] ?? [:]
             let ms = (timing["total_us"] as? Double ?? 0) / 1000
-            status(String(format: "Realtime · %.1f ms · layout pending", ms), busy: true)
+            status(String(format: "Realtime · paragraph %.1f ms · PDF updating", ms), busy: true)
         case "Diagnostics":
             let source = event["source"] as? String ?? "engine"
             diagnostics[source] = (event["items"] as? [[String: Any]] ?? []).map { item in
@@ -304,17 +300,13 @@ final class RealtimeController {
             }
             let problems = diagnostics.values.flatMap { $0 }
             DispatchQueue.main.async { [weak self] in self?.onDiagnostics?(problems) }
-        case "BackgroundScheduled": status("Realtime · background layout scheduled", busy: true)
+        case "BackgroundScheduled":
+            if publishedRevision < revision { status("Realtime · background layout scheduled", busy: true) }
         default: break
         }
     }
 
-    private func message(_ value: [String: Any]) {
-        DispatchQueue.main.async { [weak self] in guard let self, available else { return }; onMessage?(value) }
-    }
-
     private func status(_ text: String, busy: Bool, issues: Bool = false) {
-        message(["type": "status", "text": text, "kind": issues ? "warn" : busy ? "live" : "ok", "tooltip": text])
         DispatchQueue.main.async { [weak self] in guard let self, available else { return }; onStatus?(text, busy, issues) }
     }
 
@@ -326,61 +318,4 @@ final class RealtimeController {
         DispatchQueue.main.async { [weak self] in self?.available = false; self?.onFailure?(reason) }
     }
 
-    private func locate(_ name: String) -> URL? {
-        if let cached = located[name] { return cached }
-        let direct = name.hasPrefix("/") ? URL(fileURLWithPath: name) : root.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: direct.path) { located[name] = direct; return direct }
-        guard let kpse = Shell.which("kpsewhich") else { return nil }
-        let result = Shell.run(kpse, [name], cwd: root)
-        guard result.status == 0, let path = result.output.split(whereSeparator: \.isNewline).first else { return nil }
-        let url = URL(fileURLWithPath: String(path)); located[name] = url; return url
-    }
-
-    private func mapLine(_ name: String) -> String? {
-        if fontMap == nil {
-            fontMap = [:]
-            if let url = locate("pdftex.map"), let text = try? String(contentsOf: url, encoding: .utf8) {
-                for line in text.split(whereSeparator: \.isNewline) {
-                    if let key = line.split(whereSeparator: \.isWhitespace).first, !key.hasPrefix("%") { fontMap?[String(key)] = String(line) }
-                }
-            }
-        }
-        return fontMap?[name]
-    }
-
-    private func fontResource(_ descriptor: [String: Any]) -> [String: Any] {
-        let line = mapLine(descriptor["name"] as? String ?? "")
-        // Match map-file downloads (<foo.enc, <<font.pfb, <[foo.enc).
-        let tokens = line?.split(whereSeparator: \.isWhitespace).map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "<[")) } ?? []
-        let name = descriptor["filename"] as? String ?? tokens.first(where: { $0.hasSuffix(".pfb") || $0.hasSuffix(".pfa") })
-        guard let name, let url = locate(name), let data = try? Data(contentsOf: url) else {
-            return ["kind": "missing", "reason": "Font outline unavailable"]
-        }
-        if ["otf", "ttf"].contains(url.pathExtension.lowercased()) { return ["kind": "sfnt", "data": data.base64EncodedString()] }
-        let enc = tokens.first(where: { $0.hasSuffix(".enc") }).flatMap { locate($0) }.flatMap { try? String(contentsOf: $0, encoding: .isoLatin1) }
-        return ["kind": "type1", "data": data.base64EncodedString(), "mapLine": line as Any? ?? NSNull(), "encoding": enc as Any? ?? NSNull()]
-    }
-
-    private func resources(for lists: [[String: Any]]) {
-        var fonts: [[Any]] = [], images: [[Any]] = []
-        for dl in lists {
-            for descriptor in (dl["fonts"] as? [String: [String: Any]] ?? [:]).values {
-                // pgf's nullfont is deliberately invisible and has no outlines.
-                guard descriptor["name"] is String || descriptor["filename"] is String || descriptor["psname"] is String || descriptor["fullname"] is String else { continue }
-                let filename = descriptor["filename"] as? String
-                let key = filename.map { "file:\($0)#\(descriptor["subfont"] as? Int ?? 0)" } ?? "tfm:\(descriptor["name"] ?? descriptor["id"] ?? 0)"
-                if sentFonts.insert(key).inserted { fonts.append([key, fontResource(descriptor)]) }
-            }
-            for info in (dl["images_info"] as? [String: [String: Any]] ?? [:]).values {
-                guard let name = info["file"] as? String, info["cached_picture"] as? Bool != true,
-                      sentImages.insert(name).inserted else { continue }
-                if let url = locate(name), let data = try? Data(contentsOf: url) {
-                    let ext = url.pathExtension.lowercased()
-                    let mime = ext == "pdf" ? "application/pdf" : ext == "png" ? "image/png" : "image/jpeg"
-                    images.append([name, ["kind": ext == "pdf" ? "pdf" : "bitmap", "mime": mime, "data": data.base64EncodedString()]])
-                } else { images.append([name, ["kind": "missing", "reason": "Image unavailable"]]) }
-            }
-        }
-        if !fonts.isEmpty || !images.isEmpty { message(["type": "resources", "fonts": fonts, "images": images]) }
-    }
 }

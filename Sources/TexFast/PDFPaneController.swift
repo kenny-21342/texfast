@@ -1,14 +1,16 @@
 import AppKit
 import PDFKit
 
-/// Right-hand preview. Reloading must never throw away the reader's place, so
-/// the visible page and scroll offset are captured and restored around a reload.
+/// Native PDFKit preview shared by the standard and realtime engines.
+/// Complete PDF snapshots retain the reader's page, zoom and scroll position.
 final class PDFPaneController: NSViewController {
-
     let pdfView = PDFView()
     private var url: URL?
-    private var realtimePreview: RealtimePreviewController?
-    /// Clicking a PDF page asks the editor to jump to the matching source line.
+    private var realtimeJump: ((Int, Double, Double) -> Void)?
+    private var recompileAction: (() -> Void)?
+    private var exportAction: (() -> Void)?
+    private var toolbar: NSStackView!
+    private var toolbarHeight: NSLayoutConstraint!
     var onReverseSync: ((SourceLocation) -> Void)?
     var onPageChanged: ((Int, Int) -> Void)?
     private var pageObserver: NSObjectProtocol?
@@ -20,15 +22,38 @@ final class PDFPaneController: NSViewController {
     }
 
     override func loadView() {
+        let root = NSView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
         pdfView.backgroundColor = .underPageBackgroundColor
-        view = pdfView
+        toolbar = NSStackView(views: [
+            button("−", action: #selector(zoomOut(_:)), help: "Zoom out"),
+            button("+", action: #selector(zoomIn(_:)), help: "Zoom in"),
+            button("Fit", action: #selector(fit(_:)), help: "Fit the page to the preview"),
+            button("Recompile", action: #selector(recompile(_:)), help: "Update the whole document layout"),
+            button("Export PDF", action: #selector(exportPDF(_:)), help: "Save and render a clean final PDF")
+        ])
+        toolbar.orientation = .horizontal
+        toolbar.spacing = 6
+        toolbar.isHidden = true
+        for item in [toolbar!, pdfView] {
+            item.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(item)
+        }
+        toolbarHeight = toolbar.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            toolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -8),
+            toolbar.topAnchor.constraint(equalTo: root.topAnchor), toolbarHeight,
+            pdfView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            pdfView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            pdfView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            pdfView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+        ])
+        view = root
 
-        // PDFKit's internal page view handles mouse clicks before a recognizer
-        // attached to PDFView can see them. A local monitor observes the click
-        // without consuming it, so text selection and links still work.
+        // Observe clicks without consuming them: PDFKit selection and links still work.
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self, event.window === pdfView.window else { return event }
             let point = pdfView.convert(event.locationInWindow, from: nil)
@@ -40,19 +65,27 @@ final class PDFPaneController: NSViewController {
         ) { [weak self] _ in self?.reportPage() }
     }
 
-    func showRealtime(_ controller: RealtimePreviewController) {
-        _ = view
-        realtimePreview = controller
-        addChild(controller)
-        controller.view.frame = view.bounds
-        controller.view.autoresizingMask = [.width, .height]
-        view.addSubview(controller.view)
+    private func button(_ title: String, action: Selector, help: String) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11)
+        button.toolTip = help
+        return button
     }
 
-    func hideRealtime() {
-        realtimePreview?.view.removeFromSuperview()
-        realtimePreview?.removeFromParent()
-        realtimePreview = nil
+    func enableRealtime(recompile: @escaping () -> Void, export: @escaping () -> Void,
+                        jump: @escaping (Int, Double, Double) -> Void) {
+        _ = view
+        recompileAction = recompile; exportAction = export; realtimeJump = jump
+        toolbar.isHidden = false
+        toolbarHeight.constant = 30
+    }
+
+    func disableRealtime() {
+        recompileAction = nil; exportAction = nil; realtimeJump = nil
+        toolbar.isHidden = true
+        toolbarHeight.constant = 0
     }
 
     func load(_ url: URL) {
@@ -61,15 +94,28 @@ final class PDFPaneController: NSViewController {
     }
 
     func reload() {
-        guard let url, FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let url, let document = PDFDocument(url: url), document.pageCount > 0 else { return }
+        replace(document)
+    }
 
+    /// The engine owns/prunes its files. PDFDocument(data:) retains an independent snapshot.
+    @discardableResult
+    func display(_ data: Data) -> Bool {
+        _ = view
+        guard let document = PDFDocument(data: data), document.pageCount > 0 else { return false }
+        replace(document)
+        return true
+    }
+
+    private func replace(_ document: PDFDocument) {
+        _ = view
         let previousPage = pdfView.currentPage.map { pdfView.document?.index(for: $0) ?? 0 }
         let previousOrigin = pdfView.documentView?.enclosingScrollView?.contentView.bounds.origin
-
-        guard let document = PDFDocument(url: url) else { return }
+        let fitting = pdfView.autoScales
+        let scale = pdfView.scaleFactor
         pdfView.document = document
-
-        if let previousPage, previousPage < document.pageCount, let page = document.page(at: previousPage) {
+        if !fitting { pdfView.scaleFactor = scale }
+        if let previousPage, let page = document.page(at: min(previousPage, document.pageCount - 1)) {
             pdfView.go(to: page)
             if let previousOrigin, let clip = pdfView.documentView?.enclosingScrollView?.contentView {
                 clip.scroll(to: previousOrigin)
@@ -79,60 +125,43 @@ final class PDFPaneController: NSViewController {
         reportPage()
     }
 
-    /// Scroll to a SyncTeX hit and flash it, so the eye lands in the right place.
     func reveal(_ location: PDFLocation) {
-        if let realtimePreview {
-            realtimePreview.post(["type": "reveal", "page": location.page,
-                                  "x": location.x * 65781.76, "y": location.y * 65781.76, "force": true])
-            return
-        }
-        guard let document = pdfView.document,
-              location.page >= 1, location.page <= document.pageCount,
-              let page = document.page(at: location.page - 1) else { return }
-
+        guard let document = pdfView.document, location.page >= 1,
+              location.page <= document.pageCount, let page = document.page(at: location.page - 1) else { return }
         let bounds = page.bounds(for: .mediaBox)
-        // SyncTeX measures from the top-left; PDF user space from the bottom-left.
-        let rect = NSRect(x: location.x - 4,
-                          y: bounds.height - location.y - location.height - 4,
-                          width: max(location.width, 24) + 8,
-                          height: max(location.height, 12) + 8)
-
+        let rect = NSRect(x: location.x - 4, y: bounds.height - location.y - location.height - 4,
+                          width: max(location.width, 24) + 8, height: max(location.height, 12) + 8)
         pdfView.go(to: rect, on: page)
         reportPage()
-        flash(rect, on: page)
+        let highlight = PDFAnnotation(bounds: rect, forType: .highlight, withProperties: nil)
+        highlight.color = NSColor.systemYellow.withAlphaComponent(0.55)
+        page.addAnnotation(highlight)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak page] in page?.removeAnnotation(highlight) }
     }
 
     private func reportPage() {
-        guard let document = pdfView.document else {
-            onPageChanged?(0, 0)
-            return
-        }
+        guard let document = pdfView.document else { onPageChanged?(0, 0); return }
         let page = pdfView.currentPage.map { document.index(for: $0) + 1 } ?? 1
         onPageChanged?(page, document.pageCount)
     }
 
-    private func flash(_ rect: NSRect, on page: PDFPage) {
-        let highlight = PDFAnnotation(bounds: rect, forType: .highlight, withProperties: nil)
-        highlight.color = NSColor.systemYellow.withAlphaComponent(0.55)
-        page.addAnnotation(highlight)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak page] in
-            page?.removeAnnotation(highlight)
-        }
-    }
-
     private func handleClick(at point: NSPoint) {
-        guard realtimePreview == nil, let url else { return }
-        guard let page = pdfView.page(for: point, nearest: false),
-              let document = pdfView.document else { return }
+        guard let page = pdfView.page(for: point, nearest: false), let document = pdfView.document else { return }
         let pageIndex = document.index(for: page)
         let onPage = pdfView.convert(point, to: page)
         let bounds = page.bounds(for: .mediaBox)
-
-        let x = onPage.x
-        let y = bounds.height - onPage.y      // back to SyncTeX's top-left origin
+        let x = Double(onPage.x), y = Double(bounds.height - onPage.y)
+        if let realtimeJump { realtimeJump(pageIndex + 1, x, y); return }
+        guard let url else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let location = SyncTeX.inverse(page: pageIndex + 1, x: Double(x), y: Double(y), pdf: url) else { return }
+            guard let location = SyncTeX.inverse(page: pageIndex + 1, x: x, y: y, pdf: url) else { return }
             DispatchQueue.main.async { self?.onReverseSync?(location) }
         }
     }
+
+    @objc private func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
+    @objc private func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
+    @objc private func fit(_ sender: Any?) { pdfView.autoScales = true }
+    @objc private func recompile(_ sender: Any?) { recompileAction?() }
+    @objc private func exportPDF(_ sender: Any?) { exportAction?() }
 }
