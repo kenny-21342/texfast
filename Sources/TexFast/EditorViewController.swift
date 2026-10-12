@@ -82,6 +82,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private var lastHighlightedRange = NSRange(location: NSNotFound, length: 0)
     private var diagnosticRanges: [NSRange] = []
     private var syncWork: DispatchWorkItem?
+    private var cursorWork: DispatchWorkItem?
+    private var stopped = false
     private var completionRequestID = 0
     private var pendingTypedText: String?
     /// `autoCloseEnvironment` edits the text from inside the change callback,
@@ -107,6 +109,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     /// another editor rather than silently overwriting them.
     private var lastWrittenModification: Date?
     var onForwardSync: ((Int, Int) -> Void)?
+    var onCursorMoved: ((Int, Int) -> Void)?
     var onTextChanged: ((String) -> Void)?
 
     override func loadView() {
@@ -334,6 +337,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     }
 
     func stop() {
+        stopped = true
+        cursorWork?.cancel()
         autoCompile = false
         autoSaveWork?.cancel()
         syncWork?.cancel()
@@ -341,6 +346,18 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         completion.hide()
         hoverPreview?.hide()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        cursorWork?.cancel()
+        guard !stopped, !isEditingProgrammatically else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !stopped else { return }
+            let caret = caretLineAndColumn()
+            onCursorMoved?(caret.line, caret.column)
+        }
+        cursorWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     func jump(toLine line: Int) {

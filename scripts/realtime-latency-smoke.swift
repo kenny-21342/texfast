@@ -31,6 +31,8 @@ import TexFastCore
     var times: [Double] = []
     var reports: [[String: Any]] = []
     var stopped = false
+    var engineReady = false
+    var lastStatus = "", lastFast = 0
     var source = ""
     var currentRoot: URL!
 
@@ -54,7 +56,16 @@ import TexFastCore
         let url = currentRoot.appendingPathComponent("main.tex")
         try! source.write(to: url, atomically: true, encoding: .utf8)
         print("Opening \(name)"); fflush(stdout)
+        engineReady = false
         controller = MainWindowController(fileURL: url)
+        controller?.realtime?.onEngineState = { [weak self] state in
+            if state == "Ready" { self?.engineReady = true }
+        }
+        if let engine = controller?.realtime {
+            let status = engine.onStatus, fast = engine.onFast
+            engine.onStatus = { [weak self] text, busy, issues in self?.lastStatus = text; status?(text, busy, issues) }
+            engine.onFast = { [weak self] unit in self?.lastFast = unit.revision; fast?(unit) }
+        }
         controller?.showWindow(nil)
         controller?.window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -63,7 +74,7 @@ import TexFastCore
         checkTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { return }
             if DispatchTime.now().uptimeNanoseconds - waitingSince > 60_000_000_000 { fail("Preview never became ready"); return }
-            guard let window = controller?.window, let content = window.contentView,
+            guard engineReady, let window = controller?.window, let content = window.contentView,
                   let pdf = descendants(content).compactMap({ $0 as? PDFView }).first,
                   pdf.document?.pageCount == pages,
                   let provider = pdf.pageOverlayViewProvider as? NativeLiveOverlay,
@@ -86,7 +97,11 @@ import TexFastCore
         editor.textView.insertText("a", replacementRange: editor.textView.selectedRange())
         let timestamp = start
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            if self?.start == timestamp, timestamp != nil { self?.fail("No native paragraph draw after an editor insertion") }
+            if self?.start == timestamp, timestamp != nil {
+                guard let self else { return }
+                let page = preview?.currentPage.flatMap { self.preview?.document?.index(for: $0) } ?? -1
+                fail("No native paragraph draw: sample \(sample), fast revision \(lastFast), page \(page), status \(lastStatus)")
+            }
         }
     }
     func painted(_ time: UInt64) {

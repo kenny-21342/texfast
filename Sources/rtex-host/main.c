@@ -10,9 +10,11 @@
 #include <string.h>
 #include <sys/proc_info.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t stopping = 0;
+static char owner_file[PATH_MAX];
 static void request_stop(int signal_number) { stopping = signal_number; }
 
 static void kill_workers(int signal_number) {
@@ -52,6 +54,16 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL); sigaction(SIGHUP, &action, NULL);
     pid_t owner = getppid();
     if (owner == 1) return 0;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (strcmp(argv[i], "--build") == 0) {
+            mkdir(argv[i + 1], 0700);
+            if (snprintf(owner_file, sizeof(owner_file), "%s/.supervisor.pid", argv[i + 1]) >= (int)sizeof(owner_file)) return 127;
+            FILE *file = fopen(owner_file, "w");
+            if (!file) { perror("rtex-host: owner marker"); return 127; }
+            fprintf(file, "%d\n", getpid()); fclose(file);
+            break;
+        }
+    }
     pid_t child = fork();
     if (child < 0) { perror("rtex-host: fork"); return 127; }
     if (child == 0) {
@@ -75,6 +87,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 10; ++i) { usleep(20000); kill_workers(SIGTERM); }
     for (int i = 0; i < 3; ++i) { kill_workers(SIGKILL); usleep(10000); }
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+    if (owner_file[0]) unlink(owner_file);
     if (interrupted) return 0;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }

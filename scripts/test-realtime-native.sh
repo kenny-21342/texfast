@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 xcrun --toolchain default swift build
 xcrun --toolchain default swiftc -I .build/debug .build/debug/TexFastCore.o \
-  Sources/TexFast/RealtimeController.swift Sources/TexFast/ProblemsViewController.swift \
+  Sources/TexFast/RealtimeController.swift Sources/TexFast/RealtimeBuildCache.swift Sources/TexFast/ProblemsViewController.swift \
   Sources/TexFast/PDFPaneController.swift Sources/TexFast/SyncTeX.swift \
   Sources/TexFast/NativeLiveRenderer.swift Sources/TexFast/NativeLiveOverlay.swift \
   scripts/realtime-native-smoke.swift -o .build/realtime-native-smoke

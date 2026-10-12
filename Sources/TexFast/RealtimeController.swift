@@ -6,17 +6,22 @@ import TexFastCore
 final class RealtimeController {
     let root: URL
     let main: URL
-    let buildDirectory: URL
+    private var buildCache: RealtimeBuildCache?
+    private(set) var buildDirectory: URL
     private let queue = DispatchQueue(label: "texfast.realtime")
     private var process: Process?
     private var input: FileHandle?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
-    private var buffer = Data()
+    private var framer = JSONLineFramer()
     private var documents: [String: String] = [:]
     private var spans: [String: [[String: Any]]] = [:]
-    private var spanRequests: [String] = []
+    private struct SpanRequest { let path: String; let revision: Int; let finished: (() -> Void)? }
+    private var spanRequests: [SpanRequest] = []
+    private var documentRevisions: [String: Int] = [:]
+    private var navigationSequence = 0
     private var placements: [[String: Any]] = []
+    private var placementRevisions: [Int: Int] = [:]
     private var engineFiles = Set<String>()
     private var revision = 1
     private var publishedRevision = 0
@@ -33,11 +38,12 @@ final class RealtimeController {
     }
     var onFast: ((NativeLiveUnit) -> Void)?
     var onPDF: ((Data, Int, Int) -> Void)?
-    var onReveal: ((PDFLocation) -> Void)?
+    var onReveal: ((PDFLocation, Bool) -> Void)?
     var onStatus: ((String, Bool, Bool) -> Void)?
     var onDiagnostics: (([Problem]) -> Void)?
     var onSourceLocation: ((URL, Int) -> Void)?
     var onFailure: ((String) -> Void)?
+    var onEngineState: ((String) -> Void)?
 
     init(main: URL) {
         self.main = main
@@ -53,6 +59,9 @@ final class RealtimeController {
         available = true
         queue.async { [self] in
             guard !stopping else { return }
+            let cache = RealtimeBuildCache(root: root, main: main)
+            cache.prepare(main: main)
+            buildCache = cache; buildDirectory = cache.directory
             let p = Process(), out = Pipe(), err = Pipe(), stdin = Pipe()
             p.executableURL = binary
             p.arguments = ["serve", "--project", root.path, "--main", main.lastPathComponent,
@@ -82,10 +91,9 @@ final class RealtimeController {
                     stderrTail = String((stderrTail + String(decoding: data, as: UTF8.self)).suffix(4000))
                 }
             }
-            let sessionDirectory = buildDirectory
-            p.terminationHandler = { [weak self] p in
+            p.terminationHandler = { [weak self, cache] p in
                 guard let self else {
-                    try? FileManager.default.removeItem(at: sessionDirectory)
+                    cache.release()
                     return
                 }
                 self.queue.async { [self] in
@@ -126,31 +134,33 @@ final class RealtimeController {
         }
     }
 
-    func reveal(url: URL, line: Int) {
+    func reveal(url: URL, line: Int, column: Int = 1, force: Bool = true) {
         queue.async { [weak self] in
-            guard let self else { return }
-            let path = relative(url)
-            guard let text = documents[path], let candidates = spans[path] else { return }
-            let lines = text.components(separatedBy: "\n")
-            let byte = lines.prefix(max(0, line - 1)).reduce(0) { $0 + $1.utf8.count + 1 }
-            let ordered = candidates.sorted {
-                abs((($0["range"] as? [String: Int])?["start"] ?? 0) - byte) < abs((($1["range"] as? [String: Int])?["start"] ?? 0) - byte)
+            guard let self, !stopping else { return }
+            navigationSequence += 1
+            resolveCursor(path: relative(url), line: line, column: column, force: force, token: navigationSequence)
+        }
+    }
+
+    private func requestSpans(_ path: String, finished: (() -> Void)? = nil) {
+        spanRequests.append(SpanRequest(path: path, revision: documentRevisions[path] ?? 1, finished: finished))
+        send(["cmd": "spans", "path": path])
+    }
+
+    private func resolveCursor(path: String, line: Int, column: Int, force: Bool, token: Int) {
+        guard !stopping, token == navigationSequence, !placements.isEmpty, let text = documents[path] else { return }
+        guard let candidates = spans[path] else {
+            requestSpans(path) { [weak self] in
+                self?.resolveCursor(path: path, line: line, column: column, force: force, token: token)
             }
-            let containing = candidates.first { span in
-                guard let range = span["range"] as? [String: Int] else { return false }
-                return byte >= (range["start"] ?? 0) && byte < (range["end"] ?? 0)
-            }
-            for span in (containing.map({ [$0] }) ?? []) + ordered {
-                guard let id = span["id"] as? Int,
-                      let placement = placements.first(where: { $0["par_id"] as? Int == id }),
-                      let fragment = (placement["fragments"] as? [[String: Any]])?.first,
-                      let page = fragment["page"] as? Int,
-                      let y = (fragment["baselines"] as? [Double])?.first else { continue }
-                let location = PDFLocation(page: page, x: (fragment["x"] as? Double ?? 0) / 65781.76,
-                                           y: y / 65781.76, width: 24, height: 12)
-                DispatchQueue.main.async { [weak self] in self?.onReveal?(location) }
-                return
-            }
+            return
+        }
+        let byte = RealtimeSourceMap.byteOffset(text: text, line: line, column: column)
+        guard let target = RealtimeSourceMap.target(byte: byte, spans: candidates, placements: placements) else { return }
+        let location = PDFLocation(page: target.page, x: target.x / 65781.76, y: target.y / 65781.76, width: 24, height: 12)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, available else { return }
+            onReveal?(location, force)
         }
     }
 
@@ -224,6 +234,8 @@ final class RealtimeController {
         engineFiles.insert(path)
         documents[path] = text
         revision += 1
+        documentRevisions[path] = revision
+        spans.removeValue(forKey: path)
         status("Realtime · updating layout…", busy: true)
         // Eligible paragraph edits do not automatically request pagination in rtex.
         // Reconcile the whole document once typing pauses, including unsaved buffers.
@@ -244,9 +256,7 @@ final class RealtimeController {
 
     private func consume(_ data: Data) {
         guard !stopping else { return }
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 10) {
-            let line = buffer[..<newline]; buffer.removeSubrange(...newline)
+        for line in framer.append(data) {
             guard let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             handle(value)
         }
@@ -259,19 +269,42 @@ final class RealtimeController {
             return
         }
         if event["reply"] as? String == "spans", !spanRequests.isEmpty {
-            let path = spanRequests.removeFirst()
-            spans[path] = event["spans"] as? [[String: Any]] ?? []
-            if spans[path]?.isEmpty == false { engineFiles.insert(path) }
+            let request = spanRequests.removeFirst()
+            if request.revision == (documentRevisions[request.path] ?? 1) {
+                spans[request.path] = event["spans"] as? [[String: Any]] ?? []
+                if spans[request.path]?.isEmpty == false { engineFiles.insert(request.path) }
+            }
+            request.finished?()
             return
         }
         guard let kind = event["event"] as? String else { return }
         let versions = event["versions"] as? [String: Any] ?? [:]
         let eventRevision = versions["source_revision"] as? Int ?? revision
         switch kind {
+        case "EngineState":
+            let engineState = event["state"] as? String ?? ""
+            DispatchQueue.main.async { [weak self] in
+                guard let self, available else { return }
+                onEngineState?(engineState)
+            }
+            switch event["state"] as? String {
+            case "Ready":
+                if publishedRevision == 0 { status("Realtime engine ready · preparing document layout…", busy: true) }
+            case "Failed":
+                fail("Realtime engine startup failed: \(event["reason"] as? String ?? "unknown error")")
+            default: break
+            }
         case "LayoutUpdate":
             let compile = event["compile"] as? [String: Any] ?? [:]
             let convergence = event["convergence"] as? [String: Any] ?? [:]
             let state = convergence["state"] as? String ?? "Stale"
+            liveRenderer.recordLayoutPages(event)
+            // rtex's source_revision is the current session revision, not the
+            // revision captured by this PDF. Stale passes must not clear live edits.
+            guard state != "Stale" else {
+                status("Realtime · keeping live edits · pagination pending", busy: true)
+                return
+            }
             // PDFKit shows complete layouts. Obsolete passes never replace the latest PDF.
             guard eventRevision >= revision else { return }
             if compile["state"] as? String == "Failed" {
@@ -279,9 +312,9 @@ final class RealtimeController {
                 return
             }
             placements = event["placements"] as? [[String: Any]] ?? []
+            placementRevisions.removeAll()
             for path in documents.keys.sorted() {
-                spanRequests.append(path)
-                send(["cmd": "spans", "path": path])
+                requestSpans(path)
             }
             let version = versions["layout_version"] as? Int ?? 0
             let pdfURL = (event["pdf_fallback"] as? String).map { URL(fileURLWithPath: $0) }
@@ -292,6 +325,7 @@ final class RealtimeController {
                 return
             }
             liveRenderer.installLayout(event)
+            if state == "Converged" { buildCache?.preserve(main: main) }
             publishedRevision = eventRevision
             DispatchQueue.main.async { [weak self] in
                 guard let self, available else { return }
@@ -310,6 +344,13 @@ final class RealtimeController {
             // A newer global revision may edit a different unit. The overlay orders
             // each unit independently and rejects updates older than its committed PDF.
             if let unit = liveRenderer.prepare(event) {
+                if eventRevision >= (placementRevisions[unit.id] ?? publishedRevision) {
+                    placementRevisions[unit.id] = eventRevision
+                    if let index = placements.firstIndex(where: { $0["par_id"] as? Int == unit.id }) {
+                        if statusValue == "removed" { placements.remove(at: index) }
+                        else if let fragments = event["fragments"] as? [[String: Any]] { placements[index]["fragments"] = fragments }
+                    }
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let self, available else { return }
                     onFast?(unit)
@@ -345,8 +386,7 @@ final class RealtimeController {
         try? outputPipe?.fileHandleForReading.close()
         try? errorPipe?.fileHandleForReading.close()
         outputPipe = nil; errorPipe = nil
-        // This controller created the UUID directory; all displayed PDFs own Data snapshots.
-        try? FileManager.default.removeItem(at: buildDirectory)
+        buildCache?.release(); buildCache = nil
     }
 
     private func fail(_ reason: String) {

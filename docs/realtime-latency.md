@@ -2,16 +2,16 @@
 
 Measured on this Mac on 2026-10-12: Apple Silicon, hardware identifier `Mac15,12`, 16 GiB memory, Version 27.2 (Build 26B5086k), TeX Live 2026 and the pinned realtime-tex v0.0.7 engine. The app and harness use release optimization.
 
-The benchmark instantiates the production `MainWindowController` and `EditorViewController`, inserts text through `NSTextView.insertText`, and stops the clock when the visible native PDFKit overlay finishes drawing. Thus it includes editor callbacks, UTF-8 diff, process transport, Rust/LuaTeX, display-list preparation, main-thread delivery, and CoreText/CoreGraphics drawing. It excludes physical keyboard sampling and compositor/display scan-out. Each case records 40 insertions after five warm-ups. The generated documents contain text and inline math, with explicit page breaks; they are controlled fixtures, not a universal bound for arbitrary TeX.
+The benchmark instantiates the production `MainWindowController` and `EditorViewController`, inserts text through `NSTextView.insertText`, and stops the clock when the visible native PDFKit overlay finishes drawing. Thus it includes editor callbacks, UTF-8 diff, process transport, Rust/LuaTeX, display-list preparation, main-thread delivery, and CoreText/CoreGraphics drawing. It excludes physical keyboard sampling and compositor/display scan-out. Each case waits for the live-engine Ready signal and records 40 insertions after five warm-ups. The generated documents contain text and inline math, with explicit page breaks; they are controlled fixtures, not a universal bound for arbitrary TeX.
 
 | Fixture | Initial source bytes | Median ms | p95 ms | Maximum ms |
 | --- | ---: | ---: | ---: | ---: |
-| OpenType + math, 10 pages | 8,504 | 2.07 | 10.43 | 25.48 |
-| Type 1 + math, 10 pages | 8,550 | 9.34 | 27.84 | 30.31 |
-| OpenType + math, 100 pages | 88,155 | 13.43 | 28.31 | 29.66 |
-| OpenType + math, 300 pages | 265,355 | 12.93 | 28.28 | 73.10 |
+| OpenType + math, 10 pages | 8,504 | 1.84 | 3.39 | 4.22 |
+| Type 1 + math, 10 pages | 8,550 | 2.36 | 5.59 | 12.65 |
+| OpenType + math, 100 pages | 88,155 | 3.90 | 7.88 | 10.73 |
+| OpenType + math, 300 pages | 265,355 | 4.61 | 6.54 | 103.51 |
 
-These measurements are from the patched build 5. All recorded warm p95 values are below 50 ms; one 300-page sample reached 73.10 ms. The p95 result is not a per-edit upper bound. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
+These measurements are from build 6. All recorded warm p95 values are below 50 ms; one 300-page sample reached 103.51 ms. The p95 result is not a per-edit upper bound. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
 
 ## What changed
 
@@ -25,4 +25,16 @@ A background request still follows a 350 ms typing pause for whole-document pagi
 
 `./scripts/test-realtime-native.sh` separately checks complete PDF replacement, unsaved root/included-file edits, invalid-PDF retention, page/zoom preservation, shrinking documents and native toolbar actions. `xcrun --toolchain default swift test` includes UTF-8 scalar-boundary and Unicode-normalization regression cases.
 
-The build 5 audit (`./scripts/test-realtime-audit.sh`) covers renderer fallback, removed-unit masks, nested color-stack restoration, missing-font lookup caching and retry, byte-exact Unicode reloads, navigation bounds, autosave/shutdown behavior, and actual LuaLaTeX process cleanup. The native integration test also requires independent rapid root/included-file edits to reach the fast path and verifies safe fallback after source deletion and session-directory cleanup.
+The build 5 audit (`./scripts/test-realtime-audit.sh`) covers renderer fallback, removed-unit masks, nested color-stack restoration, missing-font lookup caching and retry, byte-exact Unicode reloads, navigation bounds, autosave/shutdown behavior, and actual LuaLaTeX process cleanup. The native integration test also requires independent rapid root/included-file edits to reach the fast path and verifies safe fallback after source deletion and release of the retained startup-cache lease.
+
+## Startup and cursor following (build 6)
+
+The startup audit found a 13.8 MB layout message from the physics notes. The previous reader rescanned its accumulated Data on every 4 KiB chunk; the isolated framing benchmark exceeded 60 seconds before completing the message. The new reader scans only incoming bytes and framed the entire message in 5.2 ms. This measures framing alone, excluding JSON decoding, native resource preparation, and PDFKit loading.
+
+A persistent cache now preserves complete, source-hashed capture/PDF pairs outside the engine’s two mutable pass slots. This protects startup after the app closes during an unfinished background pass. Reopening restores the completed snapshot before launching the engine; the library checks its source hash, and a new full pass reconciles the document. Concurrent sessions use isolated temporary builds.
+
+Using a validated cache from the read-only engine baseline, the production window loaded the 112-page notes in 4.088 seconds and delivered the engine Ready signal in 4.090 seconds. Reopening measured 3.477 and 3.479 seconds respectively. Source files were unchanged. The cold engine-only baseline reached Ready in 3.819 seconds and its first provisional 110-page layout in 51.846 seconds; full TikZ typesetting remains more expensive than cache restoration. These measurements describe this project and machine, not a universal startup limit. Raw data is in [realtime-startup-results.json](realtime-startup-results.json).
+
+Follow cursor ports the plugin’s UTF-8 span lookup and proportional row/fragment targeting into Swift. Native selection notifications debounce for 150 ms, refresh invalidated span metadata on demand, and follow live fragment placements. PDFKit scrolls an out-of-view target about 35% down the viewport, leaves visible targets alone, preserves editor focus, and adds a marker only for forced navigation. The native checkbox disables automatic movement while manual `⌘J` remains available.
+
+The long-document typing regression also checks that a stale background pass cannot clear a newer live edit. The engine reports the current session source revision in these events; the host rejects their `Stale` convergence state and keeps page deltas for the next accepted sparse layout.

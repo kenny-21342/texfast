@@ -112,7 +112,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
 
     private var lsp: LSPClient?
     private var builder: BuildController!
-    private var realtime: RealtimeController?
+    private(set) var realtime: RealtimeController?
     private var fileURL: URL!
     private var symbolWork: DispatchWorkItem?
     private var sourceWatcher: FileWatcher?
@@ -355,6 +355,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             if !editor.autoCompile { scheduleSymbolRefresh() }
         }
         editor.onForwardSync = { [weak self] line, column in self?.forwardSync(line: line, column: column) }
+        editor.onCursorMoved = { [weak self] line, column in self?.followCursor(line: line, column: column) }
+        preview.onFollowChanged = { [weak self] enabled in if enabled { self?.followCursor() } }
 
         preview.onReverseSync = { [weak self] location in
             guard let self else { return }
@@ -410,8 +412,9 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         engine.onPDF = { [weak self] data, revision, _ in
             guard let self else { return }
             if !preview.display(data, revision: revision) { realtimeFailed("The engine PDF could not be opened") }
+            else { followCursor() }
         }
-        engine.onReveal = { [weak self] location in self?.preview.reveal(location) }
+        engine.onReveal = { [weak self] location, force in self?.preview.reveal(location, force: force) }
         engine.onStatus = { [weak self] message, busy, issues in
             guard let self else { return }
             status.stringValue = message
@@ -676,9 +679,16 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
+    private func followCursor(line: Int? = nil, column: Int? = nil) {
+        guard preview.followsCursor, let realtime, realtime.available,
+              window?.firstResponder === editor.textView else { return }
+        let caret = editor.caretLineAndColumn()
+        realtime.reveal(url: editor.fileURL ?? fileURL, line: line ?? caret.line, column: column ?? caret.column, force: false)
+    }
+
     private func forwardSync(line: Int, column: Int) {
         if let realtime {
-            realtime.reveal(url: editor.fileURL ?? fileURL, line: line)
+            realtime.reveal(url: editor.fileURL ?? fileURL, line: line, column: column)
             return
         }
         let shadow = builder.shadowURL

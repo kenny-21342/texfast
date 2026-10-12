@@ -117,11 +117,22 @@ final class NativeLiveRenderer {
     private var imageStamps: [String: Date] = [:]
     private var warmed = false
     private var pages: [Int: [String: Any]] = [:]
+    private var dirtyPages = Set<Int>()
     private var originalMasks: [Int: [Int: [CGRect]]] = [:]
     init(root: URL) { self.root = root }
 
+    /// Keep the engine's page deltas even when a stale PDF is not displayed.
+    /// The next accepted pass may omit pages unchanged since that stale pass.
+    func recordLayoutPages(_ event: [String: Any]) {
+        for page in event["pages_changed"] as? [[String: Any]] ?? [] {
+            guard let n = page["page"] as? Int, let dl = page["dl"] as? [String: Any] else { continue }
+            pages[n] = dl; dirtyPages.insert(n)
+        }
+    }
+
     /// Warm resources before enabling editing and retain row geometry for masking old text.
     func installLayout(_ event: [String: Any]) {
+        recordLayoutPages(event)
         // Retry unavailable resources on the next complete layout, not once per glyph.
         failedFonts.removeAll(keepingCapacity: true)
         for (file, stamp) in imageStamps {
@@ -130,9 +141,8 @@ final class NativeLiveRenderer {
                 imageStamps.removeValue(forKey: file)
             }
         }
-        for page in event["pages_changed"] as? [[String: Any]] ?? [] {
-            guard let n = page["page"] as? Int, let dl = page["dl"] as? [String: Any] else { continue }
-            pages[n] = dl
+        for n in dirtyPages.sorted() {
+            guard let dl = pages[n] else { continue }
             for desc in (dl["fonts"] as? [String: [String: Any]] ?? [:]).values { _ = font(desc) }
             if !warmed { for info in (dl["images_info"] as? [String: [String: Any]] ?? [:]).values { _ = image(info) } }
             // Warm glyph lookup and CoreText sizes, keeping font setup off the per-keystroke path.
@@ -144,6 +154,7 @@ final class NativeLiveRenderer {
                 }
             }
         }
+        dirtyPages.removeAll(keepingCapacity: true)
         warmed = true
         let total = event["pages_total"] as? Int ?? 0
         pages = pages.filter { $0.key <= total }

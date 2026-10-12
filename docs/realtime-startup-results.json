@@ -1,0 +1,46 @@
+{
+  "method": "Production MainWindowController construction to first engine PDF installed in PDFKit and Ready event delivered through the Rust bridge. Physics notes had a validated source-hashed cache prepared by the read-only baseline run. Sources remained byte-for-byte unchanged.",
+  "physics_notes": [
+    {
+      "engine_ready_seconds": 4.089721083641052,
+      "pages": 112,
+      "phase": "initial",
+      "preview_seconds": 4.087728023529053,
+      "source_bytes": 444260
+    },
+    {
+      "engine_ready_seconds": 3.4789469242095947,
+      "pages": 112,
+      "phase": "reopened",
+      "preview_seconds": 3.4773459434509277,
+      "source_bytes": 444260
+    }
+  ],
+  "fixture": [
+    {
+      "engine_ready_seconds": 1.1199380159378052,
+      "pages": 3,
+      "phase": "initial",
+      "preview_seconds": 2.1585609912872314,
+      "source_bytes": 160
+    },
+    {
+      "pages": 3,
+      "phase": "reopened",
+      "preview_seconds": 0.920760989189148,
+      "source_bytes": 160
+    }
+  ],
+  "framing": {
+    "event_bytes": 13836254,
+    "chunk_bytes": 4096,
+    "old_reader_exceeded_seconds": 60,
+    "old_reader_progress_bytes": 12558336,
+    "single_pass_reader_seconds": 0.005213022232055664
+  },
+  "engine_only_cold_baseline": {
+    "ready_seconds": 3.819,
+    "first_provisional_layout_seconds": 51.846,
+    "first_provisional_pages": 110
+  }
+}

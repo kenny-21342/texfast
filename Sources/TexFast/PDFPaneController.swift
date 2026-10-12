@@ -13,6 +13,9 @@ final class PDFPaneController: NSViewController {
     private var exportAction: (() -> Void)?
     private var toolbar: NSStackView!
     private var toolbarHeight: NSLayoutConstraint!
+    private var followButton: NSButton!
+    private(set) var followsCursor = UserDefaults.standard.object(forKey: "TexFastFollowCursor") as? Bool ?? true
+    var onFollowChanged: ((Bool) -> Void)?
     var onReverseSync: ((SourceLocation) -> Void)?
     var onPageChanged: ((Int, Int) -> Void)?
     private var pageObserver: NSObjectProtocol?
@@ -30,10 +33,16 @@ final class PDFPaneController: NSViewController {
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
         pdfView.backgroundColor = .underPageBackgroundColor
+        followButton = NSButton(checkboxWithTitle: "Follow cursor", target: self, action: #selector(toggleFollow(_:)))
+        followButton.state = followsCursor ? .on : .off
+        followButton.controlSize = .small
+        followButton.font = .systemFont(ofSize: 11)
+        followButton.toolTip = "Keep the editing cursor visible in the preview"
         toolbar = NSStackView(views: [
             button("−", action: #selector(zoomOut(_:)), help: "Zoom out"),
             button("+", action: #selector(zoomIn(_:)), help: "Zoom in"),
             button("Fit", action: #selector(fit(_:)), help: "Fit the page to the preview"),
+            followButton,
             button("Recompile", action: #selector(recompile(_:)), help: "Update the whole document layout"),
             button("Export PDF", action: #selector(exportPDF(_:)), help: "Save and render a clean final PDF")
         ])
@@ -141,14 +150,32 @@ final class PDFPaneController: NSViewController {
         reportPage()
     }
 
-    func reveal(_ location: PDFLocation) {
+    func reveal(_ location: PDFLocation, force: Bool = true) {
+        guard force || followsCursor else { return }
         guard let document = pdfView.document, location.page >= 1,
               location.page <= document.pageCount, let page = document.page(at: location.page - 1) else { return }
         let bounds = page.bounds(for: .mediaBox)
-        let rect = NSRect(x: location.x - 4, y: bounds.height - location.y - location.height - 4,
+        let point = NSPoint(x: bounds.minX + location.x, y: bounds.maxY - location.y)
+        let visiblePoint = pdfView.convert(point, from: page)
+        let visible = pdfView.bounds
+        if !force, visiblePoint.x >= visible.minX, visiblePoint.x <= visible.maxX,
+           visiblePoint.y > visible.minY + visible.height * 0.15,
+           visiblePoint.y < visible.maxY - visible.height * 0.15 { return }
+        let rect = NSRect(x: point.x - 4, y: point.y - location.height - 4,
                           width: max(location.width, 24) + 8, height: max(location.height, 12) + 8)
         pdfView.go(to: rect, on: page)
+        // Put the target 35% down the viewport, matching the plugin. PDFKit owns
+        // page conversion/scale; the native scroll view clamps the document edges.
+        if let documentView = pdfView.documentView, let clip = documentView.enclosingScrollView?.contentView {
+            let target = documentView.convert(pdfView.convert(point, from: page), from: pdfView)
+            var origin = clip.bounds.origin
+            origin.y = target.y - clip.bounds.height * (documentView.isFlipped ? 0.35 : 0.65)
+            if target.x < clip.bounds.minX || target.x > clip.bounds.maxX { origin.x = max(0, target.x - 40) }
+            clip.scroll(to: origin)
+            clip.enclosingScrollView?.reflectScrolledClipView(clip)
+        }
         reportPage()
+        guard force else { return }
         let highlight = PDFAnnotation(bounds: rect, forType: .highlight, withProperties: nil)
         highlight.color = NSColor.systemYellow.withAlphaComponent(0.55)
         page.addAnnotation(highlight)
@@ -166,7 +193,7 @@ final class PDFPaneController: NSViewController {
         let pageIndex = document.index(for: page)
         let onPage = pdfView.convert(point, to: page)
         let bounds = page.bounds(for: .mediaBox)
-        let x = Double(onPage.x), y = Double(bounds.height - onPage.y)
+        let x = Double(onPage.x - bounds.minX), y = Double(bounds.maxY - onPage.y)
         if let realtimeJump { realtimeJump(pageIndex + 1, x, y); return }
         guard let url else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -176,6 +203,11 @@ final class PDFPaneController: NSViewController {
     }
 
     @objc private func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
+    @objc private func toggleFollow(_ sender: NSButton) {
+        followsCursor = sender.state == .on
+        UserDefaults.standard.set(followsCursor, forKey: "TexFastFollowCursor")
+        onFollowChanged?(followsCursor)
+    }
     @objc private func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
     @objc private func fit(_ sender: Any?) { pdfView.autoScales = true }
     @objc private func recompile(_ sender: Any?) { recompileAction?() }

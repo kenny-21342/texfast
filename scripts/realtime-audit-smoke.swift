@@ -46,6 +46,17 @@ import TexFastCore
               "a removed unit with no display list clears its previous drawing")
         var unsupported = dl; unsupported["flags"] = ["unknown-operation": true]
         check(renderer.prepare(event(unsupported)) == nil, "unsupported operations preserve the complete PDF")
+        let sparseRenderer = NativeLiveRenderer(root: root)
+        sparseRenderer.installLayout(layout(dl))
+        var movedRow = row(colors); movedRow["x"] = 20 * sp
+        let movedDL: [String: Any] = ["lines": [movedRow]]
+        sparseRenderer.recordLayoutPages(["pages_changed": [["page": 1, "dl": movedDL]]])
+        let beforeCommit = sparseRenderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 3]])
+        check(beforeCommit?.pages[1]?.bounds.minX == -0.75, "a stale page delta does not move the displayed PDF masks")
+        var movedFragment = fragment; movedFragment["x"] = 20 * sp
+        sparseRenderer.installLayout(["pages_total": 1, "pages_changed": [], "placements": [["par_id": 1, "fragments": [movedFragment]]]])
+        let afterCommit = sparseRenderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 4]])
+        check(afterCommit?.pages[1]?.bounds.minX == 19.25, "an accepted sparse layout includes deltas from skipped stale passes")
 
         // Count real subprocess lookups, including repeated glyphs referencing one missing font.
         let kpse = root.appendingPathComponent("kpsewhich"), calls = root.appendingPathComponent("calls")
@@ -105,11 +116,59 @@ import TexFastCore
               "fallback clears provisional overlays even when no replacement PDF exists")
 
         let source = root.appendingPathComponent("unicode.tex"), editor = EditorViewController()
+        let firstLease = RealtimeBuildCache(root: root, main: source)
+        let concurrentLease = RealtimeBuildCache(root: root, main: source)
+        check(firstLease.persistent && !concurrentLease.persistent && firstLease.directory != concurrentLease.directory,
+              "concurrent sessions cannot share the engine build directory")
+        let temporaryDirectory = concurrentLease.directory
+        concurrentLease.release()
+        check(!FileManager.default.fileExists(atPath: temporaryDirectory.path), "temporary concurrent-session builds are cleaned up")
+        let pass = firstLease.directory.appendingPathComponent("bg/pass-0")
+        try FileManager.default.createDirectory(at: pass, withIntermediateDirectories: true)
+        try Data("{\"pages\":112}".utf8).write(to: pass.appendingPathComponent("unicode.rtex.json"))
+        try Data("hash".utf8).write(to: pass.appendingPathComponent("rtex-sources"))
+        firstLease.prepare(main: source)
+        check(!FileManager.default.fileExists(atPath: pass.appendingPathComponent("rtex-sources").path),
+              "partial or missing PDFs cannot be advertised as a complete startup cache")
+        var media = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let pdfFile = pass.appendingPathComponent("unicode.pdf")
+        let pdfContext = CGContext(pdfFile as CFURL, mediaBox: &media, nil)!
+        pdfContext.beginPDFPage(nil); pdfContext.setFillColor(NSColor.white.cgColor); pdfContext.fill(media)
+        pdfContext.endPDFPage(); pdfContext.closePDF()
+        let goodCapture = Data("{\"pages\":1}".utf8)
+        try goodCapture.write(to: pass.appendingPathComponent("unicode.rtex.json"))
+        try Data("0123456789abcdef\n".utf8).write(to: pass.appendingPathComponent("rtex-sources"))
+        firstLease.preserve(main: source)
+        let sealed = firstLease.directory.appendingPathComponent("startup/pass-0")
+        check(PDFDocument(url: sealed.appendingPathComponent("unicode.pdf"))?.pageCount == 1,
+              "a complete startup pass is sealed outside the mutable engine slots")
+        try Data("{\"pages\":1,\"changed\":true}".utf8).write(to: pass.appendingPathComponent("unicode.rtex.json"))
+        firstLease.preserve(main: source)
+        check((try? Data(contentsOf: sealed.appendingPathComponent("unicode.rtex.json"))) == goodCapture,
+              "an old source hash cannot seal a capture from a newer interrupted pass")
+        try Data("partial".utf8).write(to: pdfFile)
+        firstLease.prepare(main: source)
+        check(PDFDocument(url: pdfFile)?.pageCount == 1 && (try? Data(contentsOf: pass.appendingPathComponent("unicode.rtex.json"))) == goodCapture,
+              "reopening restores the sealed layout after an interrupted background pass")
+        firstLease.release()
+        let reopenedLease = RealtimeBuildCache(root: root, main: source)
+        check(reopenedLease.persistent && reopenedLease.directory == firstLease.directory,
+              "the previous engine cache survives shutdown and is reused")
+        reopenedLease.release()
         let composed = "caf\u{e9}\n", decomposed = "cafe\u{301}\n"
         try composed.write(to: source, atomically: true, encoding: .utf8)
         _ = editor.view; try editor.load(source)
         try decomposed.write(to: source, atomically: true, encoding: .utf8)
         check(editor.reloadFromDisk() && editor.textView.string.utf8.elementsEqual(decomposed.utf8), "external Unicode normalization changes reload byte-for-byte")
+        var cursorEvents: [(Int, Int)] = []
+        editor.onCursorMoved = { cursorEvents.append(($0, $1)) }
+        editor.textView.setSelectedRange(NSRange(location: 1, length: 0))
+        editor.textView.setSelectedRange(NSRange(location: 2, length: 0))
+        editor.textView.setSelectedRange(NSRange(location: 3, length: 0))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.22))
+        let caret = editor.caretLineAndColumn()
+        check(cursorEvents.count == 1 && cursorEvents.last?.0 == caret.line && cursorEvents.last?.1 == caret.column,
+              "mouse/keyboard caret movement is coalesced with a 150 ms follow delay")
         editor.jump(toLine: 999)
         check(editor.textView.selectedRange().location == (decomposed as NSString).length, "out-of-range source navigation clamps to the document end")
         editor.autoCompileDelay = 0.05

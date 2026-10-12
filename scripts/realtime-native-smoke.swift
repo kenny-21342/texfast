@@ -36,11 +36,13 @@ import TexFastCore
             print(text)
             engine.stop()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                if FileManager.default.fileExists(atPath: engine.buildDirectory.path) {
-                    print("FAIL: session build files survived shutdown")
+                let cache = RealtimeBuildCache(root: root, main: main)
+                if !cache.persistent || cache.directory != engine.buildDirectory {
+                    print("FAIL: shutdown did not release the reusable engine cache")
                     try? FileManager.default.removeItem(at: root)
                     exit(1)
                 }
+                cache.release()
                 try? FileManager.default.removeItem(at: root)
                 exit(code)
             }
