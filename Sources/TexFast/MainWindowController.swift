@@ -335,10 +335,13 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             self?.updatePreviewDetail()
         }
 
-        editor.onSave = { [weak self] in
-            self?.sourceWatcher?.acknowledgeOwnWrite()
-            if let url = self?.editor.fileURL { self?.projectWatcher?.acknowledgeOwnWrite(url) }
-            self?.builder.build()
+        editor.onSave = { [weak self] reason in
+            guard let self else { return }
+            sourceWatcher?.acknowledgeOwnWrite()
+            if let url = editor.fileURL { projectWatcher?.acknowledgeOwnWrite(url) }
+            if reason == .automatic, let realtime, realtime.available {
+                realtime.refresh(activeURL: editor.fileURL, text: editor.textView.string)
+            } else { builder.build() }
         }
         editor.onAutoSaveBlocked = { [weak self] in
             self?.status.stringValue = "\(self?.fileURL.lastPathComponent ?? "The file") changed on disk — auto-compile paused, ⌘S to overwrite"
@@ -799,6 +802,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     }
 
     func shutDown() {
+        editor.stop()
         realtime?.stop()
         terminalController?.stop()
         sourceWatcher?.stop()

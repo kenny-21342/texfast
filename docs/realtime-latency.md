@@ -6,12 +6,12 @@ The benchmark instantiates the production `MainWindowController` and `EditorView
 
 | Fixture | Initial source bytes | Median ms | p95 ms | Maximum ms |
 | --- | ---: | ---: | ---: | ---: |
-| OpenType + math, 10 pages | 8,504 | 2.04 | 11.40 | 11.80 |
-| Type 1 + math, 10 pages | 8,550 | 1.78 | 11.21 | 12.55 |
-| OpenType + math, 100 pages | 88,155 | 11.63 | 12.31 | 13.02 |
-| OpenType + math, 300 pages | 265,355 | 12.18 | 13.41 | 14.36 |
+| OpenType + math, 10 pages | 8,504 | 2.07 | 10.43 | 25.48 |
+| Type 1 + math, 10 pages | 8,550 | 9.34 | 27.84 | 30.31 |
+| OpenType + math, 100 pages | 88,155 | 13.43 | 28.31 | 29.66 |
+| OpenType + math, 300 pages | 265,355 | 12.93 | 28.28 | 73.10 |
 
-All recorded warm p95 values are below 50 ms. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
+These measurements are from the patched build 5. All recorded warm p95 values are below 50 ms; one 300-page sample reached 73.10 ms. The p95 result is not a per-edit upper bound. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
 
 ## What changed
 
@@ -24,3 +24,5 @@ A background request still follows a 350 ms typing pause for whole-document pagi
 `./scripts/test-realtime-fidelity.sh` compares the provisional native drawing against the subsequent shipped PDF, rasterized through PDFKit at 1200 × 1600. It requires at least 99% ink/color correspondence in both directions within one pixel, allowing rasterizer edge anti-aliasing differences. Cases cover OpenType colored text and fraction math, encoded Type 1 text/math, a TikZ path with CMYK fill and a label, and an asymmetric four-color image. The raw results are in [realtime-fidelity-results.json](realtime-fidelity-results.json); PNG pairs are saved under `.build/realtime-fidelity/` for inspection.
 
 `./scripts/test-realtime-native.sh` separately checks complete PDF replacement, unsaved root/included-file edits, invalid-PDF retention, page/zoom preservation, shrinking documents and native toolbar actions. `xcrun --toolchain default swift test` includes UTF-8 scalar-boundary and Unicode-normalization regression cases.
+
+The build 5 audit (`./scripts/test-realtime-audit.sh`) covers renderer fallback, removed-unit masks, nested color-stack restoration, missing-font lookup caching and retry, byte-exact Unicode reloads, navigation bounds, autosave/shutdown behavior, and actual LuaLaTeX process cleanup. The native integration test also requires independent rapid root/included-file edits to reach the fast path and verifies safe fallback after source deletion and session-directory cleanup.

@@ -7,7 +7,7 @@ xcrun --toolchain default swift build -c release "$@"
 APP="TexFast Realtime.app"
 if [ -d "$APP" ]; then chmod -R u+w "$APP"; rm -rf "$APP"; fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/rtex"
-cp .build/release/{TexFast,fastex} "$APP/Contents/MacOS/"
+cp .build/release/{TexFast,fastex,rtex-host} "$APP/Contents/MacOS/"
 cp .build/realtime-engine/bin/rtex "$APP/Contents/MacOS/"
 cp -R .build/realtime-engine/share/rtex/tex "$APP/Contents/Resources/rtex/"
 cp Resources/TexFastRealtime.icns "$APP/Contents/Resources/"
@@ -24,7 +24,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>TexFastRealtime</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.2.0</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleDocumentTypes</key><array><dict>
@@ -36,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP/Contents/MacOS/rtex"
+codesign --force --sign - "$APP/Contents/MacOS/rtex-host"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 echo "built $(pwd)/$APP"

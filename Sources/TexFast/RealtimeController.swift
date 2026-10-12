@@ -25,7 +25,12 @@ final class RealtimeController {
     private var layoutWork: DispatchWorkItem?
     private var stderrTail = ""
     private var diagnostics: [String: [Problem]] = [:]
-    private(set) var available = false
+    private let availabilityLock = NSLock()
+    private var isAvailable = false
+    private(set) var available: Bool {
+        get { availabilityLock.lock(); defer { availabilityLock.unlock() }; return isAvailable }
+        set { availabilityLock.lock(); defer { availabilityLock.unlock() }; isAvailable = newValue }
+    }
     var onFast: ((NativeLiveUnit) -> Void)?
     var onPDF: ((Data, Int, Int) -> Void)?
     var onReveal: ((PDFLocation) -> Void)?
@@ -43,7 +48,7 @@ final class RealtimeController {
 
     func start() {
         guard let resources = Bundle.main.resourceURL else { return }
-        let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rtex")
+        let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rtex-host")
         guard FileManager.default.isExecutableFile(atPath: binary.path) else { return }
         available = true
         queue.async { [self] in
@@ -77,10 +82,16 @@ final class RealtimeController {
                     stderrTail = String((stderrTail + String(decoding: data, as: UTF8.self)).suffix(4000))
                 }
             }
+            let sessionDirectory = buildDirectory
             p.terminationHandler = { [weak self] p in
-                self?.queue.async { [weak self] in
-                    guard let self, !stopping else { return }
-                    fail("Realtime engine exited (\(p.terminationStatus)): \(stderrTail)")
+                guard let self else {
+                    try? FileManager.default.removeItem(at: sessionDirectory)
+                    return
+                }
+                self.queue.async { [self] in
+                    self.releaseSessionFiles()
+                    guard !self.stopping else { return }
+                    self.fail("Realtime engine exited (\(p.terminationStatus)): \(self.stderrTail)")
                 }
             }
             do { try p.run(); status("Starting realtime LuaLaTeX…", busy: true) }
@@ -99,11 +110,19 @@ final class RealtimeController {
             guard let self, !stopping else { return }
             let active = activeURL?.resolvingSymlinksInPath()
             let urls = sourceURLs()
+            if let removed = documents.keys.sorted().first(where: {
+                let url = self.root.appendingPathComponent($0)
+                return url != active && !FileManager.default.fileExists(atPath: url.path)
+            }) {
+                // v0.0.7 has no remove-document API and otherwise keeps deleted text.
+                fail("Source removed: \(removed). Rebuilding from the project on disk.")
+                return
+            }
             for url in urls where url != active {
                 if let value = try? String(contentsOf: url, encoding: .utf8) { updateBuffer(url: url, text: value) }
             }
             if let active { updateBuffer(url: active, text: text) }
-            if forceLayout { send(["cmd": "request_layout"]) }
+            if forceLayout { layoutWork?.cancel(); send(["cmd": "request_layout"]) }
         }
     }
 
@@ -121,7 +140,7 @@ final class RealtimeController {
                 guard let range = span["range"] as? [String: Int] else { return false }
                 return byte >= (range["start"] ?? 0) && byte < (range["end"] ?? 0)
             }
-            for span in containing.map({ [$0] }) ?? ordered {
+            for span in (containing.map({ [$0] }) ?? []) + ordered {
                 guard let id = span["id"] as? Int,
                       let placement = placements.first(where: { $0["par_id"] as? Int == id }),
                       let fragment = (placement["fragments"] as? [[String: Any]])?.first,
@@ -284,8 +303,12 @@ final class RealtimeController {
         case "ParagraphUpdate":
             guard eventRevision > publishedRevision else { return }
             let statusValue = event["status"] as? String ?? ""
-            if statusValue == "error" { status("Realtime · source has errors · keeping the last good PDF", busy: true, issues: true); return }
-            guard eventRevision >= revision else { return }
+            if statusValue == "error" {
+                if eventRevision >= revision { status("Realtime · source has errors · keeping the last good PDF", busy: true, issues: true) }
+                return
+            }
+            // A newer global revision may edit a different unit. The overlay orders
+            // each unit independently and rejects updates older than its committed PDF.
             if let unit = liveRenderer.prepare(event) {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, available else { return }
@@ -294,7 +317,7 @@ final class RealtimeController {
             }
             let timing = event["timing"] as? [String: Any] ?? [:]
             let ms = (timing["total_us"] as? Double ?? 0) / 1000
-            status(String(format: "Realtime · paragraph %.1f ms · pagination pending", ms), busy: true)
+            if eventRevision >= revision { status(String(format: "Realtime · paragraph %.1f ms · pagination pending", ms), busy: true) }
         case "Diagnostics":
             let source = event["source"] as? String ?? "engine"
             diagnostics[source] = (event["items"] as? [[String: Any]] ?? []).map { item in
@@ -305,7 +328,7 @@ final class RealtimeController {
                                message: item["message"] as? String ?? "", origin: "Realtime")
             }
             let problems = diagnostics.values.flatMap { $0 }
-            DispatchQueue.main.async { [weak self] in self?.onDiagnostics?(problems) }
+            DispatchQueue.main.async { [weak self] in guard let self, available else { return }; onDiagnostics?(problems) }
         case "BackgroundScheduled":
             if publishedRevision < revision { status("Realtime · background layout scheduled", busy: true) }
         default: break
@@ -316,11 +339,26 @@ final class RealtimeController {
         DispatchQueue.main.async { [weak self] in guard let self, available else { return }; onStatus?(text, busy, issues) }
     }
 
+    private func releaseSessionFiles() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
+        try? outputPipe?.fileHandleForReading.close()
+        try? errorPipe?.fileHandleForReading.close()
+        outputPipe = nil; errorPipe = nil
+        // This controller created the UUID directory; all displayed PDFs own Data snapshots.
+        try? FileManager.default.removeItem(at: buildDirectory)
+    }
+
     private func fail(_ reason: String) {
         guard !stopping else { return }
         stopping = true
+        available = false
+        layoutWork?.cancel()
         try? input?.close(); input = nil
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
         if process?.isRunning == true { process?.terminate() }
+        else { releaseSessionFiles() }
         DispatchQueue.main.async { [weak self] in self?.available = false; self?.onFailure?(reason) }
     }
 

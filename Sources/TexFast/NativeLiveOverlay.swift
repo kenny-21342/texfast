@@ -15,8 +15,20 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
         units = units.filter { $0.value.revision > revision }
         views.removeAll()
     }
+    func clear() {
+        revisionFloor = Int.max
+        units.removeAll()
+        for view in views.values {
+            view.units.removeAll(); view.revisions.removeAll()
+            view.needsDisplay = true
+        }
+    }
     func apply(_ unit: NativeLiveUnit) {
         guard unit.revision > revisionFloor, unit.revision >= (units[unit.id]?.revision ?? 0) else { return }
+        guard let document, unit.pages.keys.allSatisfy({ n in
+            guard n > 0, n <= document.pageCount, let page = document.page(at: n - 1) else { return false }
+            return supports(page)
+        }) else { return }
         units[unit.id] = unit
         for view in views.values {
             let old = view.units[unit.id]?.bounds ?? .null
@@ -32,7 +44,9 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
         guard let document else { return nil }
         let key = ObjectIdentifier(page)
         if let existing = views[key] { return existing }
-        let n = document.index(for: page) + 1
+        let index = document.index(for: page)
+        guard index != NSNotFound, supports(page) else { return nil }
+        let n = index + 1
         let overlay = NativeLiveOverlayView(pageNumber: n, size: page.bounds(for: .mediaBox).size)
         for unit in units.values {
             if let drawing = unit.pages[n] { overlay.units[unit.id] = drawing; overlay.revisions[unit.id] = unit.revision }
@@ -45,6 +59,11 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
     func draw(page: Int, in context: CGContext) {
         let drawings = units.values.compactMap { $0.pages[page] }
         drawLivePages(drawings, in: context)
+    }
+
+    private func supports(_ page: PDFPage) -> Bool {
+        let media = page.bounds(for: .mediaBox)
+        return page.rotation == 0 && media.origin == .zero && page.bounds(for: .cropBox) == media
     }
 }
 

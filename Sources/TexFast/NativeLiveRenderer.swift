@@ -109,6 +109,7 @@ private struct NativeGraphicsIndex {
 final class NativeLiveRenderer {
     private let root: URL
     private var fonts: [String: NativeFont] = [:]
+    private var failedFonts = Set<String>()
     private var locations: [String: URL] = [:]
     private var fontMap: [String: String]?
     private var images: [String: CGImage] = [:]
@@ -121,6 +122,8 @@ final class NativeLiveRenderer {
 
     /// Warm resources before enabling editing and retain row geometry for masking old text.
     func installLayout(_ event: [String: Any]) {
+        // Retry unavailable resources on the next complete layout, not once per glyph.
+        failedFonts.removeAll(keepingCapacity: true)
         for (file, stamp) in imageStamps {
             if let url = locations[file], imageStamp(url) != stamp {
                 images.removeValue(forKey: file); pdfImages.removeValue(forKey: file)
@@ -175,10 +178,11 @@ final class NativeLiveRenderer {
     func prepare(_ event: [String: Any]) -> NativeLiveUnit? {
         guard let id = event["par_id"] as? Int,
               let revision = (event["versions"] as? [String: Any])?["source_revision"] as? Int,
-              let dl = event["dl"] as? [String: Any], let masks = originalMasks[id], !masks.isEmpty else { return nil }
+              let masks = originalMasks[id], !masks.isEmpty else { return nil }
         if event["status"] as? String == "removed" {
             return NativeLiveUnit(id: id, revision: revision, pages: masks.mapValues { NativeLivePage(masks: $0, drawing: []) })
         }
+        guard let dl = event["dl"] as? [String: Any] else { return nil }
         guard ["ok", "ok_degraded"].contains(event["status"] as? String ?? "") else { return nil }
         let native = event["native"] as? [String: Any]
         let graphics = native.map(NativeGraphicsIndex.init)
@@ -257,7 +261,9 @@ final class NativeLiveRenderer {
                 let stack = Int(number(item[1])), command = Int(number(item[2]))
                 let parsed = pdfColor(item[3] as? String ?? "")
                 switch command {
-                case 0: stacks[stack] = [parsed ?? color]
+                case 0:
+                    if stacks[stack]?.isEmpty == false { stacks[stack]?.removeLast() }
+                    stacks[stack, default: []].append(parsed ?? color)
                 case 1: stacks[stack, default: []].append(parsed ?? color)
                 case 2: if stacks[stack]?.isEmpty == false { stacks[stack]?.removeLast() }
                 default: break
@@ -374,6 +380,8 @@ final class NativeLiveRenderer {
     private func font(_ desc: [String: Any]) -> NativeFont? {
         let key = (desc["filename"] as? String).map { $0 + "#\(Int(number(desc["subfont"])))" } ?? (desc["name"] as? String ?? "")
         if let cached = fonts[key] { return cached }
+        guard !failedFonts.contains(key) else { return nil }
+        failedFonts.insert(key)
         var filename = desc["filename"] as? String, encoding: [Int: String] = [:], slant = 0.0, extend = 1.0
         if filename == nil {
             if fontMap == nil {
@@ -412,6 +420,7 @@ final class NativeLiveRenderer {
         }
         let font = NativeFont(cg: cg, encoding: encoding, slant: slant, extend: extend)
         fonts[key] = font
+        failedFonts.remove(key)
         return font
     }
     private func parseEncoding(_ text: String) -> [Int: String] {

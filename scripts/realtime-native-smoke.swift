@@ -26,6 +26,9 @@ import TexFastCore
         var editing = false, finished = false, latestVersion = -1
         var recompileCount = 0, exportCount = 0, pageCount = 0
         var sawParagraph = false
+        var testingRemoval = false
+        var fastUnits = Set<Int>()
+        engine.onFast = { unit in fastUnits.insert(unit.id); pane.displayFast(unit) }
         pane.enableRealtime(recompile: { recompileCount += 1 }, export: { exportCount += 1 }, jump: { _, _, _ in })
         pane.onPageChanged = { _, total in pageCount = total }
         func finish(_ code: Int32, _ text: String) {
@@ -33,6 +36,11 @@ import TexFastCore
             print(text)
             engine.stop()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                if FileManager.default.fileExists(atPath: engine.buildDirectory.path) {
+                    print("FAIL: session build files survived shutdown")
+                    try? FileManager.default.removeItem(at: root)
+                    exit(1)
+                }
                 try? FileManager.default.removeItem(at: root)
                 exit(code)
             }
@@ -41,7 +49,11 @@ import TexFastCore
             if !value { finish(1, "FAIL: \(reason)") }
             return value
         }
-        engine.onFailure = { finish(1, "FAIL engine: \($0)") }
+        engine.onFailure = { reason in
+            if testingRemoval && reason.contains("Source removed: chapter.tex") {
+                finish(0, "PASS PDFKit: rapid independent edits, UTF-8, native drawing, page/zoom retention, corrupt/shrinking PDFs, toolbar, safe source removal")
+            } else { finish(1, "FAIL engine: \(reason)") }
+        }
         engine.onStatus = { text, _, issues in
             print(text)
             if text.contains("paragraph") { sawParagraph = true }
@@ -49,7 +61,7 @@ import TexFastCore
         }
         engine.onPDF = { data, revision, version in
             guard !finished, require(version > latestVersion, "layout versions must increase"),
-                  require(pane.display(data), "PDFKit opens the engine PDF"),
+                  require(pane.display(data, revision: revision), "PDFKit opens the engine PDF"),
                   let document = pane.pdfView.document else { return }
             latestVersion = version
             guard require(document.pageCount == 2 && pageCount == 2, "two pages and native page-count notification") else { return }
@@ -72,6 +84,7 @@ import TexFastCore
                   require(pane.pdfView.currentPage.map { document.index(for: $0) } == 1, "retain page two"),
                   require(abs(pane.pdfView.scaleFactor - 1.1) < 0.001 && !pane.pdfView.autoScales, "retain manual zoom"),
                   require(sawParagraph, "persistent fast path processed edits"),
+                  require(fastUnits.count >= 2, "independent root and included edits both reach the fast preview"),
                   require((try? String(contentsOf: main, encoding: .utf8)) == original, "root source unchanged"),
                   require((try? String(contentsOf: chapter, encoding: .utf8)) == included, "included source unchanged") else { return }
             // Capture native PDF drawing, including math and TikZ, for visual inspection.
@@ -99,7 +112,9 @@ import TexFastCore
                 if button.title == "Recompile" || button.title == "Export PDF" { button.performClick(nil) }
             }
             guard require(recompileCount == 1 && exportCount == 1, "native toolbar actions") else { return }
-            finish(0, "PASS PDFKit: selectable PDFs, unsaved rapid/UTF-8 edits, native math/TikZ drawing, page/zoom retention, invalid-PDF retention, shrinking pages, native toolbar, unchanged source")
+            testingRemoval = true
+            try! FileManager.default.removeItem(at: chapter)
+            engine.refresh(activeURL: main, text: original.replacingOccurrences(of: "world", with: "native PDFKit"), forceLayout: true)
         }
         engine.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) { finish(1, "Timed out") }

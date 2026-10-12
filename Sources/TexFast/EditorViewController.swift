@@ -90,7 +90,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
 
     var lsp: LSPClient?
     var fileURL: URL?
-    var onSave: (() -> Void)?
+    enum SaveReason { case explicit, automatic }
+    var onSave: ((SaveReason) -> Void)?
     /// Raised when an auto-save is skipped because the file changed underneath us.
     var onAutoSaveBlocked: (() -> Void)?
 
@@ -248,7 +249,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
 
     /// Explicit save. Always writes, even over an external change — the user asked.
     @discardableResult
-    func save() -> Bool {
+    func save(reason: SaveReason = .explicit) -> Bool {
         guard let fileURL else { return false }
         autoSaveWork?.cancel()
         do {
@@ -257,7 +258,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         isDirty = false
         lastWrittenModification = diskModification()
         lsp?.didSave(fileURL)
-        onSave?()
+        onSave?(reason)
         return true
     }
 
@@ -276,7 +277,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     func reloadFromDisk() -> Bool {
         hoverPreview.hide()
         guard let fileURL, let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return false }
-        if text == textView.string {
+        if text.utf8.elementsEqual(textView.string.utf8) {
             lastWrittenModification = diskModification()
             return false
         }
@@ -316,7 +317,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
             onAutoSaveBlocked?()
             return
         }
-        save()
+        save(reason: .automatic)
     }
 
     private func scheduleAutoSave() {
@@ -332,13 +333,23 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         return (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
     }
 
+    func stop() {
+        autoCompile = false
+        autoSaveWork?.cancel()
+        syncWork?.cancel()
+        completionRequestID += 1
+        completion.hide()
+        hoverPreview?.hide()
+        NotificationCenter.default.removeObserver(self)
+    }
+
     func jump(toLine line: Int) {
         let ns = textView.string as NSString
         var current = 1
-        var location = 0
+        var location = line <= 1 ? 0 : ns.length
         ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
                                options: [.byLines, .substringNotRequired]) { _, range, _, stop in
-            if current == line { location = range.location; stop.pointee = true }
+            if current == max(1, line) { location = range.location; stop.pointee = true }
             current += 1
         }
         let target = NSRange(location: min(location, ns.length), length: 0)

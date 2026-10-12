@@ -12,6 +12,8 @@ let package = Package(
         .target(name: "TexFastCore", path: "Sources/TexFastCore"),
         // The command line front end.
         .executableTarget(name: "fastex", dependencies: ["TexFastCore"], path: "Sources/fastex"),
+        .executableTarget(name: "rtex-host", path: "Sources/rtex-host",
+                          linkerSettings: [.linkedLibrary("proc")]),
         // The editor.
         .executableTarget(name: "TexFast", dependencies: [
             "TexFastCore", .product(name: "SwiftTerm", package: "SwiftTerm")

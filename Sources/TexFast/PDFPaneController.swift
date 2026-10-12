@@ -86,6 +86,8 @@ final class PDFPaneController: NSViewController {
     }
 
     func disableRealtime() {
+        liveOverlay.clear()
+        pdfView.needsDisplay = true
         recompileAction = nil; exportAction = nil; realtimeJump = nil
         toolbar.isHidden = true
         toolbarHeight.constant = 0
