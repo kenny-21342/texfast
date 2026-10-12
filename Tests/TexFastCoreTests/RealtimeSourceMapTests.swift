@@ -13,6 +13,20 @@ final class RealtimeSourceMapTests: XCTestCase {
         XCTAssertEqual(RealtimeSourceMap.target(byte: 65, spans: spans, placements: placements), RealtimeCursorTarget(page: 2, x: 30, y: 140))
         XCTAssertEqual(RealtimeSourceMap.target(byte: 999, spans: spans, placements: placements)?.y, 160)
     }
+    func testLiveRowsReanchorAcrossPagesAndKeepOverflow() {
+        let fragments = placements[0]["fragments"] as! [[String: Any]]
+        let rows: [[String: Any]] = (0..<5).map { ["x": Double($0 * 3), "y": Double($0 * 12)] }
+        let result = RealtimeSourceMap.reanchor(placements: fragments, rows: rows)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result[0]["xs"] as? [Double], [21, 24])
+        XCTAssertEqual(result[0]["baselines"] as? [Double], [100, 112])
+        XCTAssertEqual(result[1]["xs"] as? [Double], [30, 33, 36])
+        XCTAssertEqual(result[1]["baselines"] as? [Double], [140, 152, 164])
+        XCTAssertEqual(result[1]["approximate"] as? Bool, true)
+        XCTAssertEqual(result[1]["first_line"] as? Int, 3)
+        XCTAssertEqual(result[1]["last_line"] as? Int, 5)
+        XCTAssertTrue(RealtimeSourceMap.reanchor(placements: [], rows: rows).isEmpty)
+    }
     func testUTF16CaretColumnsMapToEngineUTF8Offsets() {
         let text = "你好\n😀café\n"
         XCTAssertEqual(RealtimeSourceMap.byteOffset(text: text, line: 2, column: 3), 11)

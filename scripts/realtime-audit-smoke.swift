@@ -44,6 +44,11 @@ import TexFastCore
         let removed = renderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 3], "dl": NSNull()])
         check(removed?.pages[1]?.drawing.isEmpty == true && removed?.pages[1]?.masks.isEmpty == false,
               "a removed unit with no display list clears its previous drawing")
+        var added = event(dl); added["par_id"] = 2
+        check(renderer.prepare(added)?.pages[1]?.drawing.isEmpty == false,
+              "a newly inserted paragraph draws before it exists in any full PDF")
+        var unplaced = added; unplaced["fragments"] = []
+        check(renderer.prepare(unplaced) == nil, "an unplaced new unit cannot report a successful live drawing")
         var unsupported = dl; unsupported["flags"] = ["unknown-operation": true]
         check(renderer.prepare(event(unsupported)) == nil, "unsupported operations preserve the complete PDF")
         let sparseRenderer = NativeLiveRenderer(root: root)

@@ -58,7 +58,10 @@ import TexFastCore
         session.onFast = { [weak self] unit in
             guard let self, !done, let document = pane.pdfView.document else { return }
             pane.displayFast(unit)
+            guard fast == nil else { return }
             fast = raster(document, overlay: true)
+            // Only the comparison oracle needs a whole PDF, not live drawing.
+            session.requestLayout()
         }
         session.onPDF = { [weak self] data, revision, _ in
             guard let self, !done, let reference = PDFDocument(data: data) else { return }

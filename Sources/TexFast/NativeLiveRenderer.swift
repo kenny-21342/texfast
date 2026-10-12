@@ -188,8 +188,10 @@ final class NativeLiveRenderer {
     /// Unsupported material keeps its last complete drawing until the next background PDF.
     func prepare(_ event: [String: Any]) -> NativeLiveUnit? {
         guard let id = event["par_id"] as? Int,
-              let revision = (event["versions"] as? [String: Any])?["source_revision"] as? Int,
-              let masks = originalMasks[id], !masks.isEmpty else { return nil }
+              let revision = (event["versions"] as? [String: Any])?["source_revision"] as? Int else { return nil }
+        // Newly typed/split units have no rows in the last PDF. Their engine
+        // fragments are sufficient to paint them; only old text needs a mask.
+        let masks = originalMasks[id] ?? [:]
         if event["status"] as? String == "removed" {
             return NativeLiveUnit(id: id, revision: revision, pages: masks.mapValues { NativeLivePage(masks: $0, drawing: []) })
         }
@@ -229,6 +231,7 @@ final class NativeLiveRenderer {
             }
             output[page] = NativeLivePage(masks: clear, drawing: drawing)
         }
+        guard !output.isEmpty else { return nil }
         return NativeLiveUnit(id: id, revision: revision, pages: output)
     }
 

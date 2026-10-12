@@ -8,6 +8,32 @@ public struct RealtimeCursorTarget: Equatable {
 
 /// Matches the plugin's spanAt / targetInFragments mapping, in UTF-8 bytes and sp.
 public enum RealtimeSourceMap {
+    /// Re-anchor a live unit when pagination advances, preserving its relative rows.
+    public static func reanchor(placements: [[String: Any]], rows: [[String: Any]]) -> [[String: Any]] {
+        var anchors: [(Int, Double, Double)] = []
+        for fragment in placements {
+            guard let page = fragment["page"] as? Int else { continue }
+            let ys = fragment["baselines"] as? [Double] ?? [], xs = fragment["xs"] as? [Double] ?? []
+            for (i, y) in ys.enumerated() { anchors.append((page, i < xs.count ? xs[i] : fragment["x"] as? Double ?? 0, y)) }
+        }
+        var result: [[String: Any]] = [], i = 0
+        while i < anchors.count && i < rows.count {
+            let anchor = anchors[i], first = i
+            let ax = (rows[i]["x"] as? NSNumber)?.doubleValue ?? 0, ay = (rows[i]["y"] as? NSNumber)?.doubleValue ?? 0
+            var xs: [Double] = [], ys: [Double] = []
+            func add(_ index: Int) {
+                xs.append(anchor.1 + ((rows[index]["x"] as? NSNumber)?.doubleValue ?? 0) - ax)
+                ys.append(anchor.2 + ((rows[index]["y"] as? NSNumber)?.doubleValue ?? 0) - ay)
+            }
+            while i < anchors.count && anchors[i].0 == anchor.0 && i < rows.count { add(i); i += 1 }
+            var approximate = false
+            if i >= anchors.count { while i < rows.count { add(i); i += 1; approximate = true } }
+            result.append(["page": anchor.0, "first_line": first + 1, "last_line": i, "x": xs[0], "xs": xs,
+                           "baselines": ys, "approximate": approximate])
+        }
+        return result
+    }
+
     public static func byteOffset(text: String, line: Int, column: Int) -> Int {
         let lines = text.components(separatedBy: "\n")
         let index = min(max(0, line - 1), lines.count - 1)

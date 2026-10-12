@@ -195,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // dispatch — ⇧⌘ and ⌥⌘ variants silently never fire — and every sensible
         // plain-⌘ key here is either taken or misleading. It is a setting you
         // flip rarely, so the menu item alone is honest.
-        let auto = fileMenu.addItem(withTitle: "Auto-compile on Save",
+        let auto = fileMenu.addItem(withTitle: "Live Preview while Typing",
                                     action: #selector(MainWindowController.toggleAutoCompile(_:)),
                                     keyEquivalent: "")
         auto.target = nil

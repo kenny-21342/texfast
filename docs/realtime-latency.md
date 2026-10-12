@@ -1,23 +1,27 @@
 # Native realtime preview latency
 
-Measured on this Mac on 2026-10-12: Apple Silicon, hardware identifier `Mac15,12`, 16 GiB memory, Version 27.2 (Build 26B5086k), TeX Live 2026 and the pinned realtime-tex v0.0.7 engine. The app and harness use release optimization.
+Measured on this Mac on 2026-10-12: Apple Silicon, hardware identifier `Mac15,12`, 16 GiB memory, Version 27.2 (Build 26B5086k), TeX Live 2026 and the pinned realtime-tex `273f8cc` engine. The app and harness use release optimization.
 
 The benchmark instantiates the production `MainWindowController` and `EditorViewController`, inserts text through `NSTextView.insertText`, and stops the clock when the visible native PDFKit overlay finishes drawing. Thus it includes editor callbacks, UTF-8 diff, process transport, Rust/LuaTeX, display-list preparation, main-thread delivery, and CoreText/CoreGraphics drawing. It excludes physical keyboard sampling and compositor/display scan-out. Each case waits for the live-engine Ready signal and records 40 insertions after five warm-ups. The generated documents contain text and inline math, with explicit page breaks; they are controlled fixtures, not a universal bound for arbitrary TeX.
 
 | Fixture | Initial source bytes | Median ms | p95 ms | Maximum ms |
 | --- | ---: | ---: | ---: | ---: |
-| OpenType + math, 10 pages | 8,504 | 1.84 | 3.39 | 4.22 |
-| Type 1 + math, 10 pages | 8,550 | 2.36 | 5.59 | 12.65 |
-| OpenType + math, 100 pages | 88,155 | 3.90 | 7.88 | 10.73 |
-| OpenType + math, 300 pages | 265,355 | 4.61 | 6.54 | 103.51 |
+| OpenType + math, 10 pages | 8,504 | 1.96 | 6.98 | 15.73 |
+| Type 1 + math, 10 pages | 8,550 | 1.89 | 5.07 | 18.92 |
+| OpenType + math, 100 pages | 88,155 | 2.60 | 3.74 | 4.46 |
+| OpenType + math, 300 pages | 265,355 | 4.54 | 12.10 | 104.90 |
 
-These measurements are from build 6. All recorded warm p95 values are below 50 ms; one 300-page sample reached 103.51 ms. The p95 result is not a per-edit upper bound. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
+These measurements are from build 7. All recorded warm p95 values are below 50 ms; one 300-page sample reached 104.90 ms. The p95 result is not a per-edit upper bound. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
+
+## Visible unsaved editing (build 7)
+
+`./scripts/test-realtime-live-edit.sh` creates a native production window, inserts a paragraph split through `NSTextView`, and checks the new unit actually paints before a PDF containing it. It then inserts 60 edits 30 ms apart, with autosave delayed, without requesting a full PDF. The 100-page fixture painted 59/60 revisions (p95 6.13 ms) while five older background snapshots advanced. The user's 444,260-byte, 112-page physics notes painted all 60 revisions (p95 16.67 ms); the paragraph split also painted before any replacement PDF. Original source files stayed unchanged. These timings include the initial two edits, without warm-up exclusion; they exclude display scan-out. No background PDF arrived during the physics-notes typing interval, so the separate fixture tests that interleaving. Raw samples: [fixture](realtime-live-edit-results.json), [physics notes](realtime-live-edit-physics-results.json).
 
 ## What changed
 
 The PDF-only version delayed layout requests by 350 ms and waited for an entire background PDF. A simple local probe measured roughly 413 ms for that background pass itself. The new visible fast path bypasses both waits: it draws the edited unit immediately from the persistent engine's `ParagraphUpdate`, using PDFKit's native page overlays and the actual TeX font files through CoreText. It masks the old unit's rows and draws glyphs, rules, colors, supported images and native paths at the engine's exact positions. Font/encoding caches are warmed when the first full layout arrives. Per-keystroke span-list requests were removed, UTF-8 diffing avoids arrays of Unicode scalars, and native drawing operations are indexed by item rather than repeatedly scanned.
 
-A background request still follows a 350 ms typing pause for whole-document pagination, counters, cross-references and the authoritative selectable PDF. The completed PDF replaces provisional overlays for the corresponding revision, retaining page and zoom. Search/selection uses that PDF's text until it is replaced. Cold resources, unverified units, variable font axes, rotated/cropped embedded PDFs, gradients, patterns/fadings and unhandled operations keep their last complete drawing until the PDF arrives; they do not have the above fast-path guarantee.
+Build 7 removes the host’s unconditional 350 ms full-layout timer. The engine itself requests reflow for changes affecting pagination, counters and references. Background snapshots advance while typing; newer live events are reanchored and retained until their source revision is captured, retaining page and zoom. Search/selection uses that PDF's text until it is replaced. Cold resources, unverified units, variable font axes, rotated/cropped embedded PDFs, gradients, patterns/fadings and unhandled operations keep their last complete drawing until the PDF arrives; they do not have the above fast-path guarantee.
 
 ## Drawing verification
 
@@ -25,7 +29,7 @@ A background request still follows a 350 ms typing pause for whole-document pagi
 
 `./scripts/test-realtime-native.sh` separately checks complete PDF replacement, unsaved root/included-file edits, invalid-PDF retention, page/zoom preservation, shrinking documents and native toolbar actions. `xcrun --toolchain default swift test` includes UTF-8 scalar-boundary and Unicode-normalization regression cases.
 
-The build 5 audit (`./scripts/test-realtime-audit.sh`) covers renderer fallback, removed-unit masks, nested color-stack restoration, missing-font lookup caching and retry, byte-exact Unicode reloads, navigation bounds, autosave/shutdown behavior, and actual LuaLaTeX process cleanup. The native integration test also requires independent rapid root/included-file edits to reach the fast path and verifies safe fallback after source deletion and release of the retained startup-cache lease.
+The 34-check build 7 audit (`./scripts/test-realtime-audit.sh`) covers renderer fallback, removed-unit masks, nested color-stack restoration, missing-font lookup caching and retry, byte-exact Unicode reloads, navigation bounds, autosave/shutdown behavior, and actual LuaLaTeX process cleanup. The native integration test also requires independent rapid root/included-file edits to reach the fast path and verifies safe fallback after source deletion and release of the retained startup-cache lease.
 
 ## Startup and cursor following (build 6)
 
@@ -37,4 +41,4 @@ Using a validated cache from the read-only engine baseline, the production windo
 
 Follow cursor ports the plugin’s UTF-8 span lookup and proportional row/fragment targeting into Swift. Native selection notifications debounce for 150 ms, refresh invalidated span metadata on demand, and follow live fragment placements. PDFKit scrolls an out-of-view target about 35% down the viewport, leaves visible targets alone, preserves editor focus, and adds a marker only for forced navigation. The native checkbox disables automatic movement while manual `⌘J` remains available.
 
-The long-document typing regression also checks that a stale background pass cannot clear a newer live edit. The engine reports the current session source revision in these events; the host rejects their `Stale` convergence state and keeps page deltas for the next accepted sparse layout.
+The long-document typing regression also checks that a stale background pass cannot clear a newer live edit. The engine reports the current session source revision in these events; build 7 derives the captured revision from `Stale.pending_since - 1`, accepts that pagination progress and replays only newer live events against its placements. Newly created units do not require an old PDF mask. The host now bundles upstream commit `273f8cc`, including continuous-layout and prioritized-reflow fixes; both Rust and Lua files come from the same verified archive.

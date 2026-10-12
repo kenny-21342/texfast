@@ -12,6 +12,7 @@ cp .build/realtime-engine/bin/rtex "$APP/Contents/MacOS/"
 cp -R .build/realtime-engine/share/rtex/tex "$APP/Contents/Resources/rtex/"
 cp Resources/TexFastRealtime.icns "$APP/Contents/Resources/"
 cp .build/checkouts/SwiftTerm/LICENSE "$APP/Contents/Resources/SwiftTerm-LICENSE.txt"
+cp .build/realtime-engine/SOURCE_REVISION "$APP/Contents/Resources/rtex/"
 cp .build/realtime-engine/LICENSE "$APP/Contents/Resources/realtime-tex-LICENSE.txt"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,7 +25,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>TexFastRealtime</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.2.0</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleDocumentTypes</key><array><dict>

@@ -25,9 +25,9 @@ final class RealtimeController {
     private var engineFiles = Set<String>()
     private var revision = 1
     private var publishedRevision = 0
+    private var liveEvents: [Int: [String: Any]] = [:]
     private lazy var liveRenderer = NativeLiveRenderer(root: root)
     private var stopping = false
-    private var layoutWork: DispatchWorkItem?
     private var stderrTail = ""
     private var diagnostics: [String: [Problem]] = [:]
     private let availabilityLock = NSLock()
@@ -130,7 +130,15 @@ final class RealtimeController {
                 if let value = try? String(contentsOf: url, encoding: .utf8) { updateBuffer(url: url, text: value) }
             }
             if let active { updateBuffer(url: active, text: text) }
-            if forceLayout { layoutWork?.cancel(); send(["cmd": "request_layout"]) }
+            if forceLayout { send(["cmd": "request_layout"]) }
+        }
+    }
+
+    /// Settle the engine's current unsaved snapshots without re-reading disk.
+    func requestLayout() {
+        queue.async { [weak self] in
+            guard let self, !stopping else { return }
+            send(["cmd": "request_layout"])
         }
     }
 
@@ -194,7 +202,6 @@ final class RealtimeController {
         queue.async { [self] in
             guard !stopping else { return }
             stopping = true
-            layoutWork?.cancel()
             send(["cmd": "quit"])
             try? input?.close(); input = nil
             outputPipe?.fileHandleForReading.readabilityHandler = nil
@@ -236,16 +243,9 @@ final class RealtimeController {
         revision += 1
         documentRevisions[path] = revision
         spans.removeValue(forKey: path)
-        status("Realtime · updating layout…", busy: true)
-        // Eligible paragraph edits do not automatically request pagination in rtex.
-        // Reconcile the whole document once typing pauses, including unsaved buffers.
-        layoutWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, !stopping else { return }
-            send(["cmd": "request_layout"])
-        }
-        layoutWork = work
-        queue.asyncAfter(deadline: .now() + 0.35, execute: work)
+        status("Realtime · updating live drawing…", busy: false)
+        // The engine schedules reflow for row-count, structural and reference
+        // changes itself. Do not turn every keystroke into a full-PDF request.
     }
 
     private func send(_ value: [String: Any]) {
@@ -299,14 +299,11 @@ final class RealtimeController {
             let convergence = event["convergence"] as? [String: Any] ?? [:]
             let state = convergence["state"] as? String ?? "Stale"
             liveRenderer.recordLayoutPages(event)
-            // rtex's source_revision is the current session revision, not the
-            // revision captured by this PDF. Stale passes must not clear live edits.
-            guard state != "Stale" else {
-                status("Realtime · keeping live edits · pagination pending", busy: true)
-                return
-            }
-            // PDFKit shows complete layouts. Obsolete passes never replace the latest PDF.
-            guard eventRevision >= revision else { return }
+            // Like the plugin, advance pagination during typing while retaining
+            // every live result newer than the source snapshot used by the pass.
+            let capturedRevision = state == "Stale"
+                ? max(0, (convergence["pending_since"] as? Int ?? 1) - 1) : eventRevision
+            guard capturedRevision >= publishedRevision else { return }
             if compile["state"] as? String == "Failed" {
                 status("Realtime compile failed · keeping the last good PDF", busy: false, issues: true)
                 return
@@ -326,14 +323,32 @@ final class RealtimeController {
             }
             liveRenderer.installLayout(event)
             if state == "Converged" { buildCache?.preserve(main: main) }
-            publishedRevision = eventRevision
+            publishedRevision = capturedRevision
+            liveEvents = liveEvents.filter { (($0.value["versions"] as? [String: Any])?["source_revision"] as? Int ?? 0) > capturedRevision }
+            var rebased: [NativeLiveUnit] = []
+            for id in liveEvents.keys.sorted() {
+                guard var live = liveEvents[id] else { continue }
+                if live["status"] as? String != "removed",
+                   let place = placements.first(where: { $0["par_id"] as? Int == id }),
+                   let fragments = place["fragments"] as? [[String: Any]],
+                   let dl = live["dl"] as? [String: Any], let rows = dl["lines"] as? [[String: Any]] {
+                    live["fragments"] = RealtimeSourceMap.reanchor(placements: fragments, rows: rows)
+                }
+                liveEvents[id] = live
+                if let unit = liveRenderer.prepare(live) {
+                    rebased.append(unit)
+                    updatePlacement(id: id, event: live, revision: unit.revision)
+                }
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, available else { return }
-                onPDF?(data, eventRevision, version)
+                onPDF?(data, capturedRevision, version)
+                for unit in rebased { onFast?(unit) }
             }
             let issues = compile["state"] as? String != "Ok" || state == "PassLimitReached"
             let current = eventRevision >= revision && state == "Converged"
-            status(current ? "Realtime · layout converged" : "Realtime · \(state.lowercased())", busy: !current && !issues, issues: issues)
+            status(current ? "Realtime · layout converged" : !rebased.isEmpty ? "Live · pagination catching up" : "Realtime · \(state.lowercased())",
+                   busy: !current && !issues && rebased.isEmpty, issues: issues)
         case "ParagraphUpdate":
             guard eventRevision > publishedRevision else { return }
             let statusValue = event["status"] as? String ?? ""
@@ -341,24 +356,25 @@ final class RealtimeController {
                 if eventRevision >= revision { status("Realtime · source has errors · keeping the last good PDF", busy: true, issues: true) }
                 return
             }
+            if let id = event["par_id"] as? Int {
+                let previous = (liveEvents[id]?["versions"] as? [String: Any])?["source_revision"] as? Int ?? 0
+                guard eventRevision >= previous else { return }
+            }
             // A newer global revision may edit a different unit. The overlay orders
             // each unit independently and rejects updates older than its committed PDF.
-            if let unit = liveRenderer.prepare(event) {
-                if eventRevision >= (placementRevisions[unit.id] ?? publishedRevision) {
-                    placementRevisions[unit.id] = eventRevision
-                    if let index = placements.firstIndex(where: { $0["par_id"] as? Int == unit.id }) {
-                        if statusValue == "removed" { placements.remove(at: index) }
-                        else if let fragments = event["fragments"] as? [[String: Any]] { placements[index]["fragments"] = fragments }
-                    }
-                }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, available else { return }
-                    onFast?(unit)
-                }
+            guard let unit = liveRenderer.prepare(event) else {
+                if eventRevision >= revision { status("Realtime · this unit needs the full layout; live drawing unavailable", busy: true) }
+                return
+            }
+            liveEvents[unit.id] = event
+            updatePlacement(id: unit.id, event: event, revision: eventRevision)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, available else { return }
+                onFast?(unit)
             }
             let timing = event["timing"] as? [String: Any] ?? [:]
             let ms = (timing["total_us"] as? Double ?? 0) / 1000
-            if eventRevision >= revision { status(String(format: "Realtime · paragraph %.1f ms · pagination pending", ms), busy: true) }
+            if eventRevision >= revision { status(String(format: "Live · paragraph %.1f ms · pagination pending", ms), busy: false) }
         case "Diagnostics":
             let source = event["source"] as? String ?? "engine"
             diagnostics[source] = (event["items"] as? [[String: Any]] ?? []).map { item in
@@ -371,8 +387,25 @@ final class RealtimeController {
             let problems = diagnostics.values.flatMap { $0 }
             DispatchQueue.main.async { [weak self] in guard let self, available else { return }; onDiagnostics?(problems) }
         case "BackgroundScheduled":
-            if publishedRevision < revision { status("Realtime · background layout scheduled", busy: true) }
+            if publishedRevision < revision {
+                let live = liveEvents.values.contains { (($0["versions"] as? [String: Any])?["source_revision"] as? Int ?? 0) == revision }
+                status(live ? "Live · pagination catching up" : "Realtime · background layout scheduled", busy: !live)
+            }
         default: break
+        }
+    }
+
+    private func updatePlacement(id: Int, event: [String: Any], revision: Int) {
+        guard revision >= (placementRevisions[id] ?? publishedRevision) else { return }
+        placementRevisions[id] = revision
+        if event["status"] as? String == "removed" {
+            placements.removeAll { $0["par_id"] as? Int == id }
+        } else if let fragments = event["fragments"] as? [[String: Any]] {
+            if let index = placements.firstIndex(where: { $0["par_id"] as? Int == id }) {
+                placements[index]["fragments"] = fragments
+            } else {
+                placements.append(["par_id": id, "fragments": fragments])
+            }
         }
     }
 
@@ -393,7 +426,6 @@ final class RealtimeController {
         guard !stopping else { return }
         stopping = true
         available = false
-        layoutWork?.cancel()
         try? input?.close(); input = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil

@@ -123,7 +123,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     private var problemsDismissed = false
     private var previewPage = 0
     private var previewPageCount = 0
-    private enum PreviewState { case previous, stale, building, current, issues, failed, external }
+    private enum PreviewState { case previous, stale, building, live, current, issues, failed, external }
     private var previewState: PreviewState = .previous
 
     convenience init(fileURL: URL) {
@@ -419,7 +419,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             guard let self else { return }
             status.stringValue = message
             if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-            setPreviewState(issues ? .issues : busy ? .building : .current)
+            setPreviewState(issues ? .issues : message.hasPrefix("Live ·") ? .live : busy ? .building : .current)
         }
         engine.onDiagnostics = { [weak self] problems in
             self?.compileProblems = problems; self?.refreshProblems()
@@ -432,6 +432,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         }
         realtime = engine
         engine.start()
+        updateModeLabel()
         guard engine.available else { realtime = nil; return }
         preview.enableRealtime(
             recompile: { [weak self] in
@@ -458,6 +459,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     private func realtimeFailed(_ reason: String) {
         guard realtime != nil else { return }
         realtime?.stop(); realtime = nil
+        updateModeLabel()
         preview.disableRealtime()
         preview.load(builder.pdfURL)
         builder.onPreviewRequested = nil
@@ -524,6 +526,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             (label, color, tip) = ("STALE", .systemOrange, "The source or project files changed after this PDF")
         case .building:
             (label, color, tip) = ("UPDATING", .controlAccentColor, "A preview build is running")
+        case .live:
+            (label, color, tip) = ("LIVE", .systemGreen, "Unsaved edits are drawn live; full pagination continues in the background")
         case .current:
             (label, color, tip) = ("CURRENT", .systemGreen, "The latest preview build completed without TeX errors")
         case .issues:
@@ -710,18 +714,19 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         editor.autoCompile = enabled
         UserDefaults.standard.set(enabled, forKey: autoCompileDefaultsKey)
         updateModeLabel()
-        status.stringValue = enabled
-            ? "Auto-compile on — realtime preview while typing"
-            : "Auto-compile off — ⌘S to build"
+        status.stringValue = realtime?.available == true
+            ? (enabled ? "Live editing on" : "Live editing paused — ⌘S to build")
+            : (enabled ? "Auto-compile on" : "Auto-compile off — ⌘S to build")
     }
 
     private func updateModeLabel() {
-        modeLabel.stringValue = editor.autoCompile ? "AUTO PREVIEW" : "MANUAL PREVIEW"
+        modeLabel.stringValue = realtime?.available == true ? (editor.autoCompile ? "LIVE EDITING" : "LIVE PAUSED") : (editor.autoCompile ? "AUTO PREVIEW" : "MANUAL PREVIEW")
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleAutoCompile(_:)) {
             item.state = editor.autoCompile ? .on : .off
+            item.title = realtime?.available == true ? "Live Preview while Typing" : "Auto-compile on Save"
         }
         return true
     }
