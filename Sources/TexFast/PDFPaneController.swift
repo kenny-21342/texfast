@@ -5,7 +5,9 @@ import PDFKit
 /// Complete PDF snapshots retain the reader's page, zoom and scroll position.
 final class PDFPaneController: NSViewController {
     let pdfView = PDFView()
+    let liveOverlay = NativeLiveOverlay()
     private var url: URL?
+    private var previousDocuments: [PDFDocument] = []
     private var realtimeJump: ((Int, Double, Double) -> Void)?
     private var recompileAction: (() -> Void)?
     private var exportAction: (() -> Void)?
@@ -23,6 +25,7 @@ final class PDFPaneController: NSViewController {
 
     override func loadView() {
         let root = NSView()
+        pdfView.pageOverlayViewProvider = liveOverlay
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
@@ -100,19 +103,30 @@ final class PDFPaneController: NSViewController {
 
     /// The engine owns/prunes its files. PDFDocument(data:) retains an independent snapshot.
     @discardableResult
-    func display(_ data: Data) -> Bool {
+    func display(_ data: Data, revision: Int = Int.max) -> Bool {
         _ = view
         guard let document = PDFDocument(data: data), document.pageCount > 0 else { return false }
-        replace(document)
+        replace(document, revision: revision)
         return true
     }
 
-    private func replace(_ document: PDFDocument) {
+    func displayFast(_ unit: NativeLiveUnit) {
+        liveOverlay.apply(unit)
+    }
+
+    private func replace(_ document: PDFDocument, revision: Int = Int.max) {
         _ = view
         let previousPage = pdfView.currentPage.map { pdfView.document?.index(for: $0) ?? 0 }
         let previousOrigin = pdfView.documentView?.enclosingScrollView?.contentView.bounds.origin
         let fitting = pdfView.autoScales
         let scale = pdfView.scaleFactor
+        // PDFKit can finish drawing an old page asynchronously during replacement.
+        // Retain a bounded pair of snapshots so its page keeps a valid document.
+        if let previous = pdfView.document {
+            previousDocuments.append(previous)
+            if previousDocuments.count > 2 { previousDocuments.removeFirst() }
+        }
+        liveOverlay.install(document: document, revision: revision)
         pdfView.document = document
         if !fitting { pdfView.scaleFactor = scale }
         if let previousPage, let page = document.page(at: min(previousPage, document.pageCount - 1)) {

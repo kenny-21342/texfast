@@ -20,11 +20,13 @@ final class RealtimeController {
     private var engineFiles = Set<String>()
     private var revision = 1
     private var publishedRevision = 0
+    private lazy var liveRenderer = NativeLiveRenderer(root: root)
     private var stopping = false
     private var layoutWork: DispatchWorkItem?
     private var stderrTail = ""
     private var diagnostics: [String: [Problem]] = [:]
     private(set) var available = false
+    var onFast: ((NativeLiveUnit) -> Void)?
     var onPDF: ((Data, Int, Int) -> Void)?
     var onReveal: ((PDFLocation) -> Void)?
     var onStatus: ((String, Bool, Bool) -> Void)?
@@ -195,16 +197,14 @@ final class RealtimeController {
     private func updateBuffer(url: URL, text: String) {
         guard !stopping, url.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else { return }
         let path = relative(url)
-        if let old = documents[path], old.utf8.elementsEqual(text.utf8) { return }
-        if engineFiles.contains(path), let old = documents[path] {
-            guard let edit = RealtimeEdit.between(old, text) else { return }
+        let edit = documents[path].flatMap { RealtimeEdit.between($0, text) }
+        if documents[path] != nil && edit == nil { return }
+        if engineFiles.contains(path), let edit {
             send(["cmd": "edit", "path": path, "start": edit.start, "end": edit.end, "text": edit.text])
         } else { send(["cmd": "set_document", "path": path, "text": text]) }
         engineFiles.insert(path)
         documents[path] = text
         revision += 1
-        spanRequests.append(path)
-        send(["cmd": "spans", "path": path])
         status("Realtime · updating layout…", busy: true)
         // Eligible paragraph edits do not automatically request pagination in rtex.
         // Reconcile the whole document once typing pauses, including unsaved buffers.
@@ -272,6 +272,7 @@ final class RealtimeController {
                 status("Realtime PDF unavailable · keeping the last good preview", busy: false, issues: true)
                 return
             }
+            liveRenderer.installLayout(event)
             publishedRevision = eventRevision
             DispatchQueue.main.async { [weak self] in
                 guard let self, available else { return }
@@ -284,11 +285,16 @@ final class RealtimeController {
             guard eventRevision > publishedRevision else { return }
             let statusValue = event["status"] as? String ?? ""
             if statusValue == "error" { status("Realtime · source has errors · keeping the last good PDF", busy: true, issues: true); return }
-            // Fast results acknowledge the edit; they are not PDFs. Preserve the PDF's
-            // placements until the background pass delivers the matching complete layout.
+            guard eventRevision >= revision else { return }
+            if let unit = liveRenderer.prepare(event) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, available else { return }
+                    onFast?(unit)
+                }
+            }
             let timing = event["timing"] as? [String: Any] ?? [:]
             let ms = (timing["total_us"] as? Double ?? 0) / 1000
-            status(String(format: "Realtime · paragraph %.1f ms · PDF updating", ms), busy: true)
+            status(String(format: "Realtime · paragraph %.1f ms · pagination pending", ms), busy: true)
         case "Diagnostics":
             let source = event["source"] as? String ?? "engine"
             diagnostics[source] = (event["items"] as? [[String: Any]] ?? []).map { item in

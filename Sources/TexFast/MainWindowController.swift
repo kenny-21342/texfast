@@ -403,9 +403,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
 
     private func startRealtime() {
         let engine = RealtimeController(main: fileURL)
-        engine.onPDF = { [weak self] data, _, _ in
+        engine.onFast = { [weak self] unit in self?.preview.displayFast(unit) }
+        engine.onPDF = { [weak self] data, revision, _ in
             guard let self else { return }
-            if !preview.display(data) { realtimeFailed("The engine PDF could not be opened") }
+            if !preview.display(data, revision: revision) { realtimeFailed("The engine PDF could not be opened") }
         }
         engine.onReveal = { [weak self] location in self?.preview.reveal(location) }
         engine.onStatus = { [weak self] message, busy, issues in

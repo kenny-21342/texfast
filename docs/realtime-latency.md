@@ -1,0 +1,26 @@
+# Native realtime preview latency
+
+Measured on this Mac on 2026-10-12: Apple Silicon, hardware identifier `Mac15,12`, 16 GiB memory, Version 27.2 (Build 26B5086k), TeX Live 2026 and the pinned realtime-tex v0.0.7 engine. The app and harness use release optimization.
+
+The benchmark instantiates the production `MainWindowController` and `EditorViewController`, inserts text through `NSTextView.insertText`, and stops the clock when the visible native PDFKit overlay finishes drawing. Thus it includes editor callbacks, UTF-8 diff, process transport, Rust/LuaTeX, display-list preparation, main-thread delivery, and CoreText/CoreGraphics drawing. It excludes physical keyboard sampling and compositor/display scan-out. Each case records 40 insertions after five warm-ups. The generated documents contain text and inline math, with explicit page breaks; they are controlled fixtures, not a universal bound for arbitrary TeX.
+
+| Fixture | Initial source bytes | Median ms | p95 ms | Maximum ms |
+| --- | ---: | ---: | ---: | ---: |
+| OpenType + math, 10 pages | 8,504 | 2.04 | 11.40 | 11.80 |
+| Type 1 + math, 10 pages | 8,550 | 1.78 | 11.21 | 12.55 |
+| OpenType + math, 100 pages | 88,155 | 11.63 | 12.31 | 13.02 |
+| OpenType + math, 300 pages | 265,355 | 12.18 | 13.41 | 14.36 |
+
+All recorded warm p95 values are below 50 ms. Raw samples are in [realtime-latency-results.json](realtime-latency-results.json). Reproduce with `./scripts/test-realtime-latency.sh` after building the app. Timing varies with document, system load, fonts and hardware; initial engine/font loading is excluded.
+
+## What changed
+
+The PDF-only version delayed layout requests by 350 ms and waited for an entire background PDF. A simple local probe measured roughly 413 ms for that background pass itself. The new visible fast path bypasses both waits: it draws the edited unit immediately from the persistent engine's `ParagraphUpdate`, using PDFKit's native page overlays and the actual TeX font files through CoreText. It masks the old unit's rows and draws glyphs, rules, colors, supported images and native paths at the engine's exact positions. Font/encoding caches are warmed when the first full layout arrives. Per-keystroke span-list requests were removed, UTF-8 diffing avoids arrays of Unicode scalars, and native drawing operations are indexed by item rather than repeatedly scanned.
+
+A background request still follows a 350 ms typing pause for whole-document pagination, counters, cross-references and the authoritative selectable PDF. The completed PDF replaces provisional overlays for the corresponding revision, retaining page and zoom. Search/selection uses that PDF's text until it is replaced. Cold resources, unverified units, variable font axes, rotated/cropped embedded PDFs, gradients, patterns/fadings and unhandled operations keep their last complete drawing until the PDF arrives; they do not have the above fast-path guarantee.
+
+## Drawing verification
+
+`./scripts/test-realtime-fidelity.sh` compares the provisional native drawing against the subsequent shipped PDF, rasterized through PDFKit at 1200 × 1600. It requires at least 99% ink/color correspondence in both directions within one pixel, allowing rasterizer edge anti-aliasing differences. Cases cover OpenType colored text and fraction math, encoded Type 1 text/math, a TikZ path with CMYK fill and a label, and an asymmetric four-color image. The raw results are in [realtime-fidelity-results.json](realtime-fidelity-results.json); PNG pairs are saved under `.build/realtime-fidelity/` for inspection.
+
+`./scripts/test-realtime-native.sh` separately checks complete PDF replacement, unsaved root/included-file edits, invalid-PDF retention, page/zoom preservation, shrinking documents and native toolbar actions. `xcrun --toolchain default swift test` includes UTF-8 scalar-boundary and Unicode-normalization regression cases.

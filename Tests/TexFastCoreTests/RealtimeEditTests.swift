@@ -17,4 +17,18 @@ final class RealtimeEditTests: XCTestCase {
         XCTAssertEqual(edit.end, 4)
         XCTAssertEqual(edit.text, "好")
     }
+    func testUTF8DiffAtEveryScalarBoundary() {
+        let pieces = ["", "a", "é", "e\u{301}", "你", "好", "🙂", "🙃", "\\alpha"]
+        for left in pieces { for right in pieces { for middle in pieces {
+            let old = left + middle + right, new = left + right + middle
+            guard let edit = RealtimeEdit.between(old, new) else {
+                XCTAssertEqual(Data(old.utf8), Data(new.utf8)); continue
+            }
+            let bytes = Data(old.utf8)
+            XCTAssertNotNil(String(data: bytes[..<edit.start], encoding: .utf8))
+            XCTAssertNotNil(String(data: bytes[edit.end...], encoding: .utf8))
+            XCTAssertEqual(bytes[..<edit.start] + Data(edit.text.utf8) + bytes[edit.end...], Data(new.utf8))
+        } } }
+    }
+
 }

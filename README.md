@@ -2,9 +2,13 @@
 
 This `realtime-tex` branch integrates [realtime-tex v0.0.7](https://github.com/kenny-21342/realtime-tex/releases/tag/v0.0.7) into the native editor through its persistent `rtex serve` API. The live PDF pane uses **Apple PDFKit**, with native AppKit controls and selectable PDF text.
 
-Download **TexFast-Realtime-v1.2.0-realtime.3-macOS-arm64.zip** from the [alternative release](https://github.com/kenny-21342/texfast/releases/tag/v1.2.0-realtime.3). It contains **TexFast Realtime.app**, with a separate app identifier and settings so it can coexist with TexFast. Its teal document-and-waveform icon distinguishes it from the purple standard app. This Apple Silicon build requires macOS 13+ and **TeX Live 2026** with LuaLaTeX. The engine is bundled; Rust, Node.js, and VS Code are unnecessary to run or build the Swift app. The app is ad-hoc signed, without notarization.
+Download **TexFast-Realtime-v1.2.0-realtime.4-macOS-arm64.zip** from the [alternative release](https://github.com/kenny-21342/texfast/releases/tag/v1.2.0-realtime.4). It contains **TexFast Realtime.app**, with a separate app identifier and settings so it can coexist with TexFast. Its teal document-and-waveform icon distinguishes it from the purple standard app. This Apple Silicon build requires macOS 13+ and **TeX Live 2026** with LuaLaTeX. The engine is bundled; Rust, Node.js, and VS Code are unnecessary to run or build the Swift app. The app is ad-hoc signed, without notarization.
 
-With auto-compile enabled, edits go directly from the unsaved editor buffer to the persistent engine. After a 350 ms typing pause, a background pass produces a complete PDF from the current in-memory sources. PDFKit displays that stable snapshot, including math, images, and TikZ, while retaining the reader’s page, manual zoom, and scroll position. Included `.tex` files are supported. Obsolete passes and failed compiles keep the last good PDF. Preview latency includes the debounce and background LuaLaTeX compile; the engine’s fast paragraph events report processing progress but are not displayed as per-keystroke overlays.
+With auto-compile enabled, edits go directly from the unsaved editor buffer to the persistent engine. Eligible unit updates draw immediately through **CoreText/CoreGraphics overlays managed by PDFKit**, using the actual TeX font files and engine glyph positions. The fast path has no typing debounce. Native support includes static OpenType/TrueType and Type 1 fonts, math, rules, colors, bitmap images, and basic TikZ paths/clips. Unsupported or degraded material retains its last complete drawing until the background PDF arrives.
+
+After a 350 ms typing pause, the engine reconciles full pagination, references, counters, and other document-wide effects. PDFKit installs the resulting stable PDF and clears the corresponding provisional overlays, preserving page, manual zoom, and scroll position. Included `.tex` files are supported. A temporary overlay uses the previous full layout’s anchors; document-wide reflow, PDF text selection/search, and clean export settle with the completed background/final PDF. Variable fonts, rotated/cropped embedded PDFs, gradients, patterns/fadings, and other unhandled operations use the full PDF path.
+
+On this Mac, the production editor benchmark measured warm p95 insertion-to-native-draw latency below 50 ms for 10-, 100-, and 300-page fixtures. See [measurements and methodology](docs/realtime-latency.md) for the values and scope. Cold engine/font startup and expensive or unsupported units are outside this fast-path result.
 
 Click the PDF to navigate to a source unit; `⌘J` and outline navigation use rtex paragraph placements. Navigation targets units rather than individual glyphs. Native controls provide zoom, Fit, Recompile, and Export PDF. Export and quitting retain the clean two-pass build from the saved original source. If the engine exits, TexFast returns to its standard build driver. Turning auto-compile off pauses sending edits until `⌘S`.
 
@@ -22,9 +26,11 @@ Validation:
 xcrun --toolchain default swift test
 python3 scripts/test-realtime-engine.py
 ./scripts/test-realtime-native.sh  # after building TexFast Realtime.app; opens a disposable native window
+./scripts/test-realtime-fidelity.sh
+./scripts/test-realtime-latency.sh
 ```
 
-The engine test checks live edits, included-file UTF-8 edits, convergence, export, and source safety. The native test runs the Swift bridge and PDFKit pane against actual LuaLaTeX output, covering unsaved rapid edits, included-file edits, selectable text, math/TikZ rendering, page/zoom retention, corrupt PDFs, shrinking documents, and toolbar actions. It saves `.build/realtime-native-preview-smoke.png`.
+The engine test checks live edits, included-file UTF-8 edits, convergence, export, and source safety. The native test runs the Swift bridge and PDFKit pane against actual LuaLaTeX output, covering unsaved rapid edits, included-file edits, selectable text, math/TikZ rendering, page/zoom retention, corrupt PDFs, shrinking documents, and toolbar actions. It saves `.build/realtime-native-preview-smoke.png`. The fidelity test compares fast native painting to the subsequent PDF, and the latency test drives the production NSTextView editor through actual PDFKit overlay drawing.
 
 The following documents the standard TexFast pipeline retained for fallback and final output.
 

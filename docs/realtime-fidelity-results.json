@@ -1,0 +1,22 @@
+[
+  {
+    "case" : "otf-math-color",
+    "fast_to_pdf" : 1,
+    "pdf_to_fast" : 0.99959316517493901
+  },
+  {
+    "case" : "type1-math",
+    "fast_to_pdf" : 1,
+    "pdf_to_fast" : 1
+  },
+  {
+    "case" : "native-tikz",
+    "fast_to_pdf" : 1,
+    "pdf_to_fast" : 1
+  },
+  {
+    "case" : "bitmap",
+    "fast_to_pdf" : 1,
+    "pdf_to_fast" : 0.99943396226415093
+  }
+]
