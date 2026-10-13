@@ -21,6 +21,12 @@ final class RealtimeController {
     private var documentRevisions: [String: Int] = [:]
     private var navigationSequence = 0
     private var placements: [[String: Any]] = []
+    private var committedPlacements: [[String: Any]] = []
+    private var pagePlacements: [[String: Any]] = []
+    private var layoutVersion = 0
+    private var previewRun = 0
+    private var discardedPreviewRun = 0
+    private var previewRevisions: [Int: Int] = [:]
     private var placementRevisions: [Int: Int] = [:]
     private var engineFiles = Set<String>()
     private var revision = 1
@@ -37,6 +43,8 @@ final class RealtimeController {
         set { availabilityLock.lock(); defer { availabilityLock.unlock() }; isAvailable = newValue }
     }
     var onFast: ((NativeLiveUnit) -> Void)?
+    var onPagePreview: ((NativeLivePagePreview, [NativeLiveUnit]) -> Void)?
+    var onPagePreviewReset: (([NativeLiveUnit]) -> Void)?
     var onPDF: ((Data, Int, Int) -> Void)?
     var onReveal: ((PDFLocation, Bool) -> Void)?
     var onStatus: ((String, Bool, Bool) -> Void)?
@@ -122,7 +130,7 @@ final class RealtimeController {
                 let url = self.root.appendingPathComponent($0)
                 return url != active && !FileManager.default.fileExists(atPath: url.path)
             }) {
-                // v0.0.7 has no remove-document API and otherwise keeps deleted text.
+                // The serve protocol has no remove-document API and otherwise keeps deleted text.
                 fail("Source removed: \(removed). Rebuilding from the project on disk.")
                 return
             }
@@ -294,6 +302,38 @@ final class RealtimeController {
                 fail("Realtime engine startup failed: \(event["reason"] as? String ?? "unknown error")")
             default: break
             }
+        case "PagePreview":
+            guard event["base_layout_version"] as? Int == layoutVersion,
+                  let run = event["run_id"] as? Int, run >= previewRun, run > discardedPreviewRun,
+                  let sourceRevision = event["source_revision"] as? Int, sourceRevision >= publishedRevision,
+                  let page = event["page"] as? [String: Any], let n = page["page"] as? Int,
+                  sourceRevision >= (previewRevisions[n] ?? 0),
+                  let prepared = liveRenderer.preparePagePreview(event) else { return }
+            previewRun = run
+            let incoming = event["placements"] as? [[String: Any]] ?? []
+            let candidate = RealtimeSourceMap.mergePage(n, incoming: incoming, into: pagePlacements)
+            // An old snapshot must never hide a newer growing paragraph. Keep the
+            // immediate live drawing until a compatible page catches up instead.
+            guard !liveEvents.values.contains(where: { conflictsWithPreview($0, placements: candidate, revisions: [n: sourceRevision]) }) else { return }
+            pagePlacements = candidate
+            liveRenderer.installPagePreview(page, placements: incoming)
+            previewRevisions[n] = sourceRevision
+            let current = rebuildLiveUnits()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, available else { return }
+                onPagePreview?(prepared, current)
+            }
+            status("Live · page \(n) reflowed · document still typesetting", busy: false)
+        case "PagePreviewReset":
+            guard event["base_layout_version"] as? Int == layoutVersion,
+                  let run = event["run_id"] as? Int, run >= previewRun else { return }
+            discardedPreviewRun = max(discardedPreviewRun, run)
+            restorePagePreviews()
+            let current = rebuildLiveUnits()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, available else { return }
+                onPagePreviewReset?(current)
+            }
         case "LayoutUpdate":
             let compile = event["compile"] as? [String: Any] ?? [:]
             let convergence = event["convergence"] as? [String: Any] ?? [:]
@@ -308,7 +348,9 @@ final class RealtimeController {
                 status("Realtime compile failed · keeping the last good PDF", busy: false, issues: true)
                 return
             }
-            placements = event["placements"] as? [[String: Any]] ?? []
+            committedPlacements = event["placements"] as? [[String: Any]] ?? []
+            pagePlacements = committedPlacements
+            placements = committedPlacements
             placementRevisions.removeAll()
             for path in documents.keys.sorted() {
                 requestSpans(path)
@@ -321,25 +363,14 @@ final class RealtimeController {
                 status("Realtime PDF unavailable · keeping the last good preview", busy: false, issues: true)
                 return
             }
+            liveRenderer.resetPagePreviews()
+            previewRevisions.removeAll(); previewRun = 0; discardedPreviewRun = 0
+            layoutVersion = version
             liveRenderer.installLayout(event)
             if state == "Converged" { buildCache?.preserve(main: main) }
             publishedRevision = capturedRevision
             liveEvents = liveEvents.filter { (($0.value["versions"] as? [String: Any])?["source_revision"] as? Int ?? 0) > capturedRevision }
-            var rebased: [NativeLiveUnit] = []
-            for id in liveEvents.keys.sorted() {
-                guard var live = liveEvents[id] else { continue }
-                if live["status"] as? String != "removed",
-                   let place = placements.first(where: { $0["par_id"] as? Int == id }),
-                   let fragments = place["fragments"] as? [[String: Any]],
-                   let dl = live["dl"] as? [String: Any], let rows = dl["lines"] as? [[String: Any]] {
-                    live["fragments"] = RealtimeSourceMap.reanchor(placements: fragments, rows: rows)
-                }
-                liveEvents[id] = live
-                if let unit = liveRenderer.prepare(live) {
-                    rebased.append(unit)
-                    updatePlacement(id: id, event: live, revision: unit.revision)
-                }
-            }
+            let rebased = rebuildLiveUnits()
             DispatchQueue.main.async { [weak self] in
                 guard let self, available else { return }
                 onPDF?(data, capturedRevision, version)
@@ -360,21 +391,41 @@ final class RealtimeController {
                 let previous = (liveEvents[id]?["versions"] as? [String: Any])?["source_revision"] as? Int ?? 0
                 guard eventRevision >= previous else { return }
             }
+            if conflictsWithPreview(event, placements: pagePlacements, revisions: previewRevisions),
+               liveRenderer.prepare(event) != nil {
+                // Row growth needs new pagination. Restore the base and continue
+                // live drawing; the engine is already arranging the next page.
+                if let id = event["par_id"] as? Int { liveEvents[id] = event }
+                restorePagePreviews()
+                let current = rebuildLiveUnits()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, available else { return }
+                    onPagePreviewReset?(current)
+                }
+            }
             // A newer global revision may edit a different unit. The overlay orders
             // each unit independently and rejects updates older than its committed PDF.
-            guard let unit = liveRenderer.prepare(event) else {
-                if eventRevision >= revision { status("Realtime · this unit needs the full layout; live drawing unavailable", busy: true) }
+            guard let (unit, located) = prepareLive(event) else {
+                if (event["fragments"] as? [[String: Any]])?.isEmpty == true, let id = event["par_id"] as? Int {
+                    // v0.0.10 retains an off-page live box until a page supplies anchors.
+                    liveEvents[id] = event
+                    status("Realtime · live box ready · page placement pending", busy: true)
+                } else if eventRevision >= revision {
+                    status("Realtime · this unit needs the full layout; live drawing unavailable", busy: true)
+                }
                 return
             }
             liveEvents[unit.id] = event
-            updatePlacement(id: unit.id, event: event, revision: eventRevision)
+            updatePlacement(id: unit.id, event: located, revision: eventRevision)
             DispatchQueue.main.async { [weak self] in
                 guard let self, available else { return }
                 onFast?(unit)
             }
             let timing = event["timing"] as? [String: Any] ?? [:]
             let ms = (timing["total_us"] as? Double ?? 0) / 1000
-            if eventRevision >= revision { status(String(format: "Live · paragraph %.1f ms · pagination pending", ms), busy: false) }
+            if eventRevision >= revision {
+                status(unit.pages.isEmpty ? "Live · page reflow catching up" : String(format: "Live · paragraph %.1f ms · pagination pending", ms), busy: false)
+            }
         case "Diagnostics":
             let source = event["source"] as? String ?? "engine"
             diagnostics[source] = (event["items"] as? [[String: Any]] ?? []).map { item in
@@ -393,6 +444,61 @@ final class RealtimeController {
             }
         default: break
         }
+    }
+
+    private func conflictsWithPreview(_ event: [String: Any], placements: [[String: Any]], revisions: [Int: Int]) -> Bool {
+        guard let id = event["par_id"] as? Int,
+              let revision = (event["versions"] as? [String: Any])?["source_revision"] as? Int else { return false }
+        let rows = (event["dl"] as? [String: Any])?["lines"] as? [[String: Any]] ?? []
+        let placed = placements.first { $0["par_id"] as? Int == id }?["fragments"] as? [[String: Any]] ?? []
+        let representedRows = placed.map { $0["last_line"] as? Int ?? 0 }.max() ?? 0
+        let fragments = placed + (event["fragments"] as? [[String: Any]] ?? [])
+        return representedRows != rows.count && fragments.contains { fragment in
+            guard let page = fragment["page"] as? Int, let captured = revisions[page] else { return false }
+            return revision > captured
+        }
+    }
+
+    private func restorePagePreviews() {
+        liveRenderer.resetPagePreviews()
+        previewRevisions.removeAll()
+        pagePlacements = committedPlacements
+    }
+
+    private func rebuildLiveUnits() -> [NativeLiveUnit] {
+        placements = pagePlacements
+        placementRevisions.removeAll()
+        var current: [NativeLiveUnit] = []
+        for id in liveEvents.keys.sorted() {
+            guard let event = liveEvents[id], let (unit, located) = prepareLive(event, reanchor: true) else { continue }
+            current.append(unit)
+            updatePlacement(id: id, event: located, revision: unit.revision)
+        }
+        return current
+    }
+
+    private func prepareLive(_ event: [String: Any], reanchor: Bool = false) -> (NativeLiveUnit, [String: Any])? {
+        var located = event
+        let place = pagePlacements.first { $0["par_id"] as? Int == event["par_id"] as? Int }
+        let rows = (event["dl"] as? [String: Any])?["lines"] as? [[String: Any]] ?? []
+        if (reanchor || !previewRevisions.isEmpty), event["status"] as? String != "removed",
+           let fragments = place?["fragments"] as? [[String: Any]], !fragments.isEmpty, !rows.isEmpty {
+            located["fragments"] = RealtimeSourceMap.reanchor(placements: fragments, rows: rows)
+        }
+        guard let unit = liveRenderer.prepare(located) else { return nil }
+        let fragments = place?["fragments"] as? [[String: Any]] ?? []
+        let capturedRows = fragments.map { $0["last_line"] as? Int ?? 0 }.max() ?? 0
+        let visible = unit.pages.filter { page, _ in
+            guard let captured = previewRevisions[page] else { return true }
+            return unit.revision > captured && capturedRows == rows.count
+        }
+        if !previewRevisions.isEmpty, event["status"] as? String != "removed" {
+            // Follow the coherent page where a newer box has not caught up in height.
+            let live = (located["fragments"] as? [[String: Any]] ?? []).filter { visible[$0["page"] as? Int ?? 0] != nil }
+            let covered = fragments.filter { visible[$0["page"] as? Int ?? 0] == nil }
+            located["fragments"] = (live + covered).sorted { ($0["page"] as? Int ?? 0) < ($1["page"] as? Int ?? 0) }
+        }
+        return (NativeLiveUnit(id: unit.id, revision: unit.revision, pages: visible), located)
     }
 
     private func updatePlacement(id: Int, event: [String: Any], revision: Int) {

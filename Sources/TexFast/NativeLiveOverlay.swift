@@ -6,20 +6,23 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
     private var document: PDFDocument?
     private var revisionFloor = 0
     private var units: [Int: NativeLiveUnit] = [:]
+    private var previews: [Int: NativeLivePagePreview] = [:]
     private var views: [ObjectIdentifier: NativeLiveOverlayView] = [:]
+    var onPreviewPaint: ((Int, Int, UInt64) -> Void)?
     var onPaint: ((Int, Int, UInt64) -> Void)?
 
     func install(document: PDFDocument, revision: Int) {
         self.document = document
         revisionFloor = revision
+        previews.removeAll()
         units = units.filter { $0.value.revision > revision }
         views.removeAll()
     }
     func clear() {
         revisionFloor = Int.max
-        units.removeAll()
+        units.removeAll(); previews.removeAll()
         for view in views.values {
-            view.units.removeAll(); view.revisions.removeAll()
+            view.units.removeAll(); view.revisions.removeAll(); view.preview = nil
             view.needsDisplay = true
         }
     }
@@ -32,7 +35,7 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
         units[unit.id] = unit
         for view in views.values {
             let old = view.units[unit.id]?.bounds ?? .null
-            if let page = unit.pages[view.pageNumber] { view.units[unit.id] = page }
+            if let page = visible(unit, on: view.pageNumber) { view.units[unit.id] = page }
             else { view.units.removeValue(forKey: unit.id) }
             view.revisions[unit.id] = unit.revision
             view.invalidate(old.union(unit.pages[view.pageNumber]?.bounds ?? .null))
@@ -40,6 +43,42 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
             if view.window != nil && !view.visibleRect.isEmpty { view.displayIfNeeded() }
         }
     }
+    func applyPreview(_ preview: NativeLivePagePreview, units current: [NativeLiveUnit]) {
+        guard preview.revision >= revisionFloor, let document,
+              let page = document.page(at: preview.page - 1), supports(page),
+              abs(page.bounds(for: .mediaBox).width - preview.size.width) < 0.1,
+              abs(page.bounds(for: .mediaBox).height - preview.size.height) < 0.1 else { return }
+        previews[preview.page] = preview
+        replaceUnits(current, changedPage: preview.page)
+    }
+
+    func resetPreviews(units current: [NativeLiveUnit]) {
+        previews.removeAll(); replaceUnits(current)
+    }
+
+    private func visible(_ unit: NativeLiveUnit, on page: Int) -> NativeLivePage? {
+        guard unit.revision > (previews[page]?.revision ?? revisionFloor) else { return nil }
+        return unit.pages[page]
+    }
+
+    private func replaceUnits(_ current: [NativeLiveUnit], changedPage: Int? = nil) {
+        units = Dictionary(current.filter { $0.revision > revisionFloor }.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
+        for view in views.values {
+            var drawings: [Int: NativeLivePage] = [:], revisions: [Int: Int] = [:]
+            for unit in units.values {
+                if let page = visible(unit, on: view.pageNumber) { drawings[unit.id] = page; revisions[unit.id] = unit.revision }
+            }
+            let changed = changedPage == nil || changedPage == view.pageNumber || revisions != view.revisions ||
+                drawings.contains { id, page in page.masks != view.units[id]?.masks }
+            view.units = drawings; view.revisions = revisions; view.preview = previews[view.pageNumber]
+            if changed {
+                if changedPage == nil || changedPage == view.pageNumber { view.previewPainted = 0 }
+                view.needsDisplay = true
+                if view.window != nil && !view.visibleRect.isEmpty { view.displayIfNeeded() }
+            }
+        }
+    }
+
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
         guard let document else { return nil }
         let key = ObjectIdentifier(page)
@@ -49,15 +88,18 @@ final class NativeLiveOverlay: NSObject, PDFPageOverlayViewProvider {
         let n = index + 1
         let overlay = NativeLiveOverlayView(pageNumber: n, size: page.bounds(for: .mediaBox).size)
         for unit in units.values {
-            if let drawing = unit.pages[n] { overlay.units[unit.id] = drawing; overlay.revisions[unit.id] = unit.revision }
+            if let drawing = visible(unit, on: n) { overlay.units[unit.id] = drawing; overlay.revisions[unit.id] = unit.revision }
         }
+        overlay.preview = previews[n]
+        overlay.onPreviewPaint = { [weak self] page, revision, time in self?.onPreviewPaint?(page, revision, time) }
         overlay.onPaint = { [weak self] id, revision, time in self?.onPaint?(id, revision, time) }
         views[key] = overlay
         return overlay
     }
     /// Used by the visual fidelity test to capture the same operations the live view draws.
     func draw(page: Int, in context: CGContext) {
-        let drawings = units.values.compactMap { $0.pages[page] }
+        let drawings = units.values.compactMap { visible($0, on: page) }
+        if let preview = previews[page] { drawLivePages([preview.content], in: context) }
         drawLivePages(drawings, in: context)
     }
 
@@ -85,6 +127,9 @@ private final class NativeLiveOverlayView: NSView {
     let pageSize: CGSize
     var units: [Int: NativeLivePage] = [:]
     var revisions: [Int: Int] = [:]
+    var preview: NativeLivePagePreview?
+    var previewPainted = 0
+    var onPreviewPaint: ((Int, Int, UInt64) -> Void)?
     private var painted: [Int: Int] = [:]
     var onPaint: ((Int, Int, UInt64) -> Void)?
     override var isFlipped: Bool { true }
@@ -103,9 +148,14 @@ private final class NativeLiveOverlayView: NSView {
         guard let context = NSGraphicsContext.current?.cgContext, pageSize.width > 0, pageSize.height > 0 else { return }
         context.saveGState()
         context.scaleBy(x: bounds.width / pageSize.width, y: bounds.height / pageSize.height)
+        if let preview { drawLivePages([preview.content], in: context) }
         drawLivePages(Array(units.values), in: context)
         context.restoreGState()
         let time = DispatchTime.now().uptimeNanoseconds
+        if let preview, preview.revision > previewPainted {
+            previewPainted = preview.revision
+            onPreviewPaint?(pageNumber, preview.revision, time)
+        }
         for (id, revision) in revisions where units[id] != nil && revision > (painted[id] ?? 0) {
             painted[id] = revision
             onPaint?(id, revision, time)

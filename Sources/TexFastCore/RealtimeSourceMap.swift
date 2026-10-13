@@ -34,6 +34,23 @@ public enum RealtimeSourceMap {
         return result
     }
 
+    /// Replace one provisional page's anchors without losing other page fragments.
+    public static func mergePage(_ page: Int, incoming: [[String: Any]], into placements: [[String: Any]]) -> [[String: Any]] {
+        var result = placements.map { place -> [String: Any] in
+            var place = place
+            place["fragments"] = (place["fragments"] as? [[String: Any]] ?? []).filter { $0["page"] as? Int != page }
+            return place
+        }
+        for place in incoming {
+            guard let id = place["par_id"] as? Int else { continue }
+            if let index = result.firstIndex(where: { $0["par_id"] as? Int == id }) {
+                let fragments = (result[index]["fragments"] as? [[String: Any]] ?? []) + (place["fragments"] as? [[String: Any]] ?? [])
+                result[index]["fragments"] = fragments.sorted { ($0["page"] as? Int ?? 0) < ($1["page"] as? Int ?? 0) }
+            } else { result.append(place) }
+        }
+        return result
+    }
+
     public static func byteOffset(text: String, line: Int, column: Int) -> Int {
         let lines = text.components(separatedBy: "\n")
         let index = min(max(0, line - 1), lines.count - 1)

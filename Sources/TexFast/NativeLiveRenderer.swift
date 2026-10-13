@@ -14,6 +14,12 @@ struct NativeLiveUnit {
     let revision: Int
     let pages: [Int: NativeLivePage]
 }
+struct NativeLivePagePreview {
+    let page: Int
+    let revision: Int
+    let size: CGSize
+    let content: NativeLivePage
+}
 struct NativeLivePage {
     let masks: [CGRect]
     let drawing: [NativeLiveOperation]
@@ -119,6 +125,8 @@ final class NativeLiveRenderer {
     private var pages: [Int: [String: Any]] = [:]
     private var dirtyPages = Set<Int>()
     private var originalMasks: [Int: [Int: [CGRect]]] = [:]
+    private var committedMasks: [Int: [Int: [CGRect]]] = [:]
+    private var previewPages: [Int: [String: Any]] = [:]
     init(root: URL) { self.root = root }
 
     /// Keep the engine's page deltas even when a stale PDF is not displayed.
@@ -158,11 +166,17 @@ final class NativeLiveRenderer {
         warmed = true
         let total = event["pages_total"] as? Int ?? 0
         pages = pages.filter { $0.key <= total }
-        originalMasks.removeAll(keepingCapacity: true)
-        for placement in event["placements"] as? [[String: Any]] ?? [] {
+        previewPages.removeAll()
+        originalMasks = masks(for: event["placements"] as? [[String: Any]] ?? [], pages: pages)
+        committedMasks = originalMasks
+    }
+
+    private func masks(for placements: [[String: Any]], pages capturePages: [Int: [String: Any]]) -> [Int: [Int: [CGRect]]] {
+        var originalMasks: [Int: [Int: [CGRect]]] = [:]
+        for placement in placements {
             guard let id = placement["par_id"] as? Int else { continue }
             for fragment in placement["fragments"] as? [[String: Any]] ?? [] {
-                guard let n = fragment["page"] as? Int, let page = pages[n] else { continue }
+                guard let n = fragment["page"] as? Int, let page = capturePages[n] else { continue }
                 let rows = page["lines"] as? [[String: Any]] ?? []
                 let baselines = fragment["baselines"] as? [Double] ?? []
                 let xs = fragment["xs"] as? [Double] ?? []
@@ -183,10 +197,51 @@ final class NativeLiveRenderer {
                 }
             }
         }
+        return originalMasks
+    }
+
+    func installPagePreview(_ page: [String: Any], placements: [[String: Any]]) {
+        guard let n = page["page"] as? Int, let dl = page["dl"] as? [String: Any] else { return }
+        previewPages[n] = dl
+        for id in Array(originalMasks.keys) { originalMasks[id]?.removeValue(forKey: n) }
+        for (id, pages) in masks(for: placements, pages: [n: dl]) {
+            originalMasks[id, default: [:]][n] = pages[n]
+        }
+    }
+
+    func resetPagePreviews() {
+        previewPages.removeAll(); originalMasks = committedMasks
+    }
+
+    /// A whole provisional page is accepted only if every operation can be drawn.
+    func preparePagePreview(_ event: [String: Any]) -> NativeLivePagePreview? {
+        guard let page = event["page"] as? [String: Any], let n = page["page"] as? Int, n > 0,
+              let revision = event["source_revision"] as? Int,
+              let dl = page["dl"] as? [String: Any], Int(number(dl["rotate"])) == 0 else { return nil }
+        let size = CGSize(width: number(dl["page_width"]) / spPerBP, height: number(dl["page_height"]) / spPerBP)
+        guard size.width > 0, size.height > 0 else { return nil }
+        let rows = dl["lines"] as? [[String: Any]] ?? []
+        var drawing: [NativeLiveOperation] = []
+        if rows.isEmpty {
+            guard (dl["flags"] as? [String: Any] ?? [:]).isEmpty else { return nil }
+            var color = CGColor(gray: 0, alpha: 1), stacks: [Int: [CGColor]] = [:]
+            guard append(dl["other"] as? [[Any]] ?? [], row: nil, offset: .zero, dl: dl,
+                         descs: dl["fonts"] as? [String: [String: Any]] ?? [:], graphics: nil,
+                         color: &color, stacks: &stacks, into: &drawing) else { return nil }
+        } else {
+            var unit: [String: Any] = ["par_id": -n, "status": "ok", "versions": ["source_revision": revision], "dl": dl,
+                "fragments": [["page": n, "first_line": 1, "last_line": rows.count,
+                               "xs": rows.map { number($0["x"]) }, "baselines": rows.map { number($0["y"]) }]]]
+            unit["native"] = page["native"]
+            guard let prepared = prepare(unit, wholePage: true)?.pages[n] else { return nil }
+            drawing = prepared.drawing
+        }
+        return NativeLivePagePreview(page: n, revision: revision, size: size,
+                                    content: NativeLivePage(masks: [CGRect(origin: .zero, size: size)], drawing: drawing))
     }
 
     /// Unsupported material keeps its last complete drawing until the next background PDF.
-    func prepare(_ event: [String: Any]) -> NativeLiveUnit? {
+    func prepare(_ event: [String: Any], wholePage: Bool = false) -> NativeLiveUnit? {
         guard let id = event["par_id"] as? Int,
               let revision = (event["versions"] as? [String: Any])?["source_revision"] as? Int else { return nil }
         // Newly typed/split units have no rows in the last PDF. Their engine
@@ -207,8 +262,8 @@ final class NativeLiveRenderer {
         var color = CGColor(gray: 0, alpha: 1), stacks: [Int: [CGColor]] = [:]
         var drewOther = false
         for fragment in event["fragments"] as? [[String: Any]] ?? [] {
-            guard let page = fragment["page"] as? Int, pages[page] != nil,
-                  Int(number(pages[page]?["rotate"])) == 0 else { return nil }
+            guard let page = fragment["page"] as? Int, wholePage || previewPages[page] != nil || pages[page] != nil,
+                  Int(number((previewPages[page] ?? pages[page])?["rotate"])) == 0 else { return nil }
             let first = Int(number(fragment["first_line"])) - 1
             let last = Int(number(fragment["last_line"])) - 1
             let baselines = fragment["baselines"] as? [Double] ?? []

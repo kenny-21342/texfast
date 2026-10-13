@@ -88,7 +88,7 @@ final class RealtimeBuildCache {
         let pdf = pass.appendingPathComponent("\(job).pdf")
         guard let stamp = try? String(contentsOf: marker, encoding: .utf8),
               stamp.trimmingCharacters(in: .whitespacesAndNewlines).count == 16,
-              modified(marker) >= max(modified(capture), modified(pdf)),
+              modified(marker) >= max(modified(capture), max(modified(pdf), modified(pass.appendingPathComponent("\(job).log")))),
               let data = try? Data(contentsOf: capture),
               let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let pages = info["pages"] as? Int, pages > 0,

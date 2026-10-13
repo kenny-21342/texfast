@@ -1,0 +1,19 @@
+{
+  "method" : "production MainWindowController construction to first engine PDF displayed by PDFKit; sources unchanged",
+  "results" : [
+    {
+      "engine_ready_seconds" : 3.6088269948959351,
+      "pages" : 112,
+      "phase" : "initial",
+      "preview_seconds" : 3.608489990234375,
+      "source_bytes" : 444260
+    },
+    {
+      "engine_ready_seconds" : 3.3741029500961304,
+      "pages" : 112,
+      "phase" : "reopened",
+      "preview_seconds" : 3.3684879541397095,
+      "source_bytes" : 444260
+    }
+  ]
+}

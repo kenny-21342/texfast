@@ -29,6 +29,8 @@ import TexFastCore
         var testingRemoval = false
         var fastUnits = Set<Int>()
         var requestedOracle = false
+        engine.onPagePreview = { page, units in pane.displayPagePreview(page, units: units) }
+        engine.onPagePreviewReset = { units in pane.resetPagePreviews(units: units) }
         engine.onFast = { unit in
             fastUnits.insert(unit.id); pane.displayFast(unit)
             if fastUnits.count >= 2 && !requestedOracle {

@@ -63,6 +63,21 @@ import TexFastCore
         let afterCommit = sparseRenderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 4]])
         check(afterCommit?.pages[1]?.bounds.minX == 19.25, "an accepted sparse layout includes deltas from skipped stale passes")
 
+        var previewDL = movedDL
+        previewDL["page_width"] = 100 * sp; previewDL["page_height"] = 100 * sp
+        let previewEvent: [String: Any] = ["source_revision": 5, "page": ["page": 1, "dl": previewDL]]
+        check(sparseRenderer.preparePagePreview(previewEvent)?.content.masks.first?.width == 100,
+              "a complete page preview clears the whole old page before drawing")
+        var badPreview = previewDL; badPreview["flags"] = ["unknown-operation": true]
+        check(sparseRenderer.preparePagePreview(["source_revision": 5, "page": ["page": 1, "dl": badPreview]]) == nil,
+              "one unsupported page operation rejects the complete provisional page")
+        renderer.installPagePreview(["page": 1, "dl": movedDL], placements: [["par_id": 1, "fragments": [movedFragment]]])
+        check(renderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 5]])?.pages[1]?.bounds.minX == 19.25,
+              "page-preview masks track the moved unit")
+        renderer.resetPagePreviews()
+        check(renderer.prepare(["par_id": 1, "status": "removed", "versions": ["source_revision": 5]])?.pages[1]?.bounds.minX == -0.75,
+              "a page-preview reset restores committed masks")
+
         // Count real subprocess lookups, including repeated glyphs referencing one missing font.
         let kpse = root.appendingPathComponent("kpsewhich"), calls = root.appendingPathComponent("calls")
         try "#!/bin/sh\nprintf x >> '\(calls.path)'\nexit 1\n".write(to: kpse, atomically: true, encoding: .utf8)
@@ -120,6 +135,24 @@ import TexFastCore
         check(painted(5).redComponent > 0.99 && painted(5).blueComponent > 0.99,
               "fallback clears provisional overlays even when no replacement PDF exists")
 
+        overlay.install(document: document, revision: 1)
+        let fullRect = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let pagePreview = NativeLivePagePreview(page: 1, revision: 3, size: fullRect.size,
+            content: NativeLivePage(masks: [fullRect], drawing: [.fill(CGPath(rect: fullRect, transform: nil), NSColor.blue.cgColor, false)]))
+        overlay.applyPreview(pagePreview, units: [solid(1, 2, .green, 0)])
+        check(painted(5).blueComponent > 0.99 && painted(5).greenComponent < 0.1,
+              "a coherent preview suppresses paragraph edits already captured in it")
+        overlay.applyPreview(pagePreview, units: [solid(1, 4, .red, 0)])
+        check(painted(5).redComponent > 0.99 && painted(25).blueComponent > 0.99,
+              "newer live text draws above the complete page preview")
+        overlay.resetPreviews(units: [solid(1, 4, .red, 0)])
+        check(painted(5).redComponent > 0.99 && painted(25).redComponent > 0.99 && painted(25).blueComponent > 0.99,
+              "preview rollback removes provisional pages and preserves newer live text")
+        overlay.applyPreview(pagePreview, units: [])
+        overlay.install(document: document, revision: 5)
+        check(painted(25).redComponent > 0.99 && painted(25).greenComponent > 0.99,
+              "a full layout restores its baseline before sparse page updates")
+
         let source = root.appendingPathComponent("unicode.tex"), editor = EditorViewController()
         let firstLease = RealtimeBuildCache(root: root, main: source)
         let concurrentLease = RealtimeBuildCache(root: root, main: source)
@@ -155,6 +188,12 @@ import TexFastCore
         firstLease.prepare(main: source)
         check(PDFDocument(url: pdfFile)?.pageCount == 1 && (try? Data(contentsOf: pass.appendingPathComponent("unicode.rtex.json"))) == goodCapture,
               "reopening restores the sealed layout after an interrupted background pass")
+        let partialLog = pass.appendingPathComponent("unicode.log")
+        try Data("unfinished new pass".utf8).write(to: partialLog)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(1)], ofItemAtPath: partialLog.path)
+        firstLease.prepare(main: source)
+        check(!FileManager.default.fileExists(atPath: partialLog.path),
+              "a newer interrupted log cannot poison the restored startup snapshot")
         firstLease.release()
         let reopenedLease = RealtimeBuildCache(root: root, main: source)
         check(reopenedLease.persistent && reopenedLease.directory == firstLease.directory,

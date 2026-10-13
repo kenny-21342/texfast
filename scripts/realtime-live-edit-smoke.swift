@@ -14,6 +14,7 @@ import TexFastCore
     var controller: MainWindowController!, editor: EditorViewController!, pdf: PDFView!
     var ready = false, hasPDF = false, started = false, done = false
     var stage = 0, inserted = 0, pdfRevision = 0, firstID: Int?, newID: Int?
+    var targetPage = 1, pagePaints = 0
     var painted = Set<Int>(), fast = Set<Int>(), stalePDFs = 0
     var splitBeforePDF = false, startTimes: [Int: UInt64] = [:], times: [Double] = []
     let oldFollow = UserDefaults.standard.object(forKey: "TexFastFollowCursor")
@@ -52,11 +53,16 @@ import TexFastCore
         }
         engine.onFast = { [self] unit in
             fast.insert(unit.revision)
-            if stage == 1 { firstID = unit.id }
+            if stage == 1 { firstID = unit.id; targetPage = unit.pages.keys.min() ?? 1 }
             if stage == 2 && unit.id != firstID {
                 newID = unit.id; splitBeforePDF = pdfRevision < unit.revision
             }
             live?(unit)
+        }
+        overlay.onPreviewPaint = { [self] page, revision, time in
+            guard stage == 3, page == targetPage, revision >= 4 else { return }
+            pagePaints += 1; painted.insert(revision)
+            if let start = startTimes.removeValue(forKey: revision) { times.append(Double(time - start)/1_000_000) }
         }
         overlay.onPaint = { [self] id, revision, time in
             guard !done else { return }
@@ -96,12 +102,12 @@ import TexFastCore
         guard !done else { return }
         if inserted == 60 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [self] in
-                guard painted.contains(63), painted.filter({ $0 >= 4 }).count >= 40 else { finish(1, "Continuous typing did not paint promptly"); return }
+                guard painted.contains(63), painted.filter({ $0 >= 4 }).count >= 40 else { finish(1, "Continuous typing did not paint promptly: last \(painted.sorted().last ?? 0), count \(painted.filter({ $0 >= 4 }).count), pages \(pagePaints)"); return }
                 guard (try? String(contentsOf: main, encoding: .utf8)) == original else { finish(1, "Source changed on disk"); return }
                 let sorted = times.sorted(), p95 = sorted[Int(ceil(Double(sorted.count) * 0.95)) - 1]
                 print(String(format: "PASS: %d/60 unsaved typing revisions painted; p95 %.2f ms; %d intervening stale PDFs; %d pages", painted.filter({ $0 >= 4 }).count, p95, stalePDFs, pdf.document?.pageCount ?? 0))
                 let report: [String: Any] = ["actual_project": actual, "source_bytes": original.utf8.count, "pages": pdf.document?.pageCount ?? 0,
-                    "split_painted_before_pdf": splitBeforePDF, "typing_revisions": 60, "painted_revisions": painted.sorted(), "stale_pdfs": stalePDFs,
+                    "split_painted_before_pdf": splitBeforePDF, "typing_revisions": 60, "painted_revisions": painted.sorted(), "stale_pdfs": stalePDFs, "page_preview_paints": pagePaints,
                     "samples_ms": times, "p95_ms": p95, "sources_unchanged": true]
                 let output = URL(fileURLWithPath: CommandLine.arguments[1])
                 try! JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: output)

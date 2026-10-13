@@ -55,6 +55,8 @@ import TexFastCore
         engine = session; editing = false; fast = nil
         session.onFailure = { [weak self] text in self?.finish(1, text) }
         session.onStatus = { [weak self] text, _, issues in if issues { self?.finish(1, text) } }
+        session.onPagePreview = { [self] page, units in pane.displayPagePreview(page, units: units) }
+        session.onPagePreviewReset = { [self] units in pane.resetPagePreviews(units: units) }
         session.onFast = { [weak self] unit in
             guard let self, !done, let document = pane.pdfView.document else { return }
             pane.displayFast(unit)

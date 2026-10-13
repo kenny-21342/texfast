@@ -84,7 +84,10 @@ import TexFastCore
             editor = editorController; preview = pdf
             editorController.autoCompile = true
             editorController.autoCompileDelay = 1000 // measure unsaved input without autosave I/O
-            provider.onPaint = { [weak self] _, _, time in self?.painted(time) }
+            provider.onPaint = { [weak self] _, revision, time in self?.painted(time, revision: revision) }
+            provider.onPreviewPaint = { [weak self] page, revision, time in
+                if page == 1 { self?.painted(time, revision: revision) }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.insert() }
         }
     }
@@ -104,8 +107,8 @@ import TexFastCore
             }
         }
     }
-    func painted(_ time: UInt64) {
-        guard let start, !stopped else { return }
+    func painted(_ time: UInt64, revision: Int) {
+        guard let start, !stopped, revision >= sample + 2 else { return }
         self.start = nil
         let elapsed = Double(time - start) / 1_000_000
         if sample >= 5 { times.append(elapsed) } // exclude five warm-up insertions

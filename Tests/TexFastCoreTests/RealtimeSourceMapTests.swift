@@ -27,6 +27,20 @@ final class RealtimeSourceMapTests: XCTestCase {
         XCTAssertEqual(result[1]["last_line"] as? Int, 5)
         XCTAssertTrue(RealtimeSourceMap.reanchor(placements: [], rows: rows).isEmpty)
     }
+    func testPagePreviewReplacesOnlyItsOwnFragmentsAndAddsNewUnits() {
+        let incoming: [[String: Any]] = [
+            ["par_id": 1, "fragments": [["page": 1, "first_line": 1, "last_line": 3, "baselines": [101.0, 121.0, 141.0]]]],
+            ["par_id": 2, "fragments": [["page": 1, "first_line": 1, "last_line": 1, "baselines": [180.0]]]]
+        ]
+        let merged = RealtimeSourceMap.mergePage(1, incoming: incoming, into: placements)
+        let first = merged.first { $0["par_id"] as? Int == 1 }!["fragments"] as! [[String: Any]]
+        XCTAssertEqual(first.count, 2)
+        XCTAssertEqual(first[0]["baselines"] as? [Double], [101, 121, 141])
+        XCTAssertEqual(first[1]["baselines"] as? [Double], [140, 160])
+        XCTAssertNotNil(merged.first { $0["par_id"] as? Int == 2 })
+        let cleared = RealtimeSourceMap.mergePage(1, incoming: [], into: merged)
+        XCTAssertEqual((cleared[0]["fragments"] as? [[String: Any]])?.count, 1)
+    }
     func testUTF16CaretColumnsMapToEngineUTF8Offsets() {
         let text = "你好\n😀café\n"
         XCTAssertEqual(RealtimeSourceMap.byteOffset(text: text, line: 2, column: 3), 11)

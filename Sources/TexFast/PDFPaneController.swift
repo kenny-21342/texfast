@@ -6,6 +6,7 @@ import PDFKit
 final class PDFPaneController: NSViewController {
     let pdfView = PDFView()
     let liveOverlay = NativeLiveOverlay()
+    private var committedPageCount = 0
     private var url: URL?
     private var previousDocuments: [PDFDocument] = []
     private var realtimeJump: ((Int, Double, Double) -> Void)?
@@ -125,6 +126,32 @@ final class PDFPaneController: NSViewController {
         liveOverlay.apply(unit)
     }
 
+    func displayPagePreview(_ preview: NativeLivePagePreview, units: [NativeLiveUnit]) {
+        guard let document = pdfView.document else { return }
+        // A provisional page can precede the first complete PDF with this page count.
+        if preview.page > document.pageCount {
+            while document.pageCount < preview.page {
+                let page = PDFPage()
+                page.setBounds(CGRect(origin: .zero, size: preview.size), for: .mediaBox)
+                document.insert(page, at: document.pageCount)
+            }
+            pdfView.layoutDocumentView()
+            reportPage()
+        }
+        liveOverlay.applyPreview(preview, units: units)
+    }
+
+    func resetPagePreviews(units: [NativeLiveUnit]) {
+        liveOverlay.resetPreviews(units: units)
+        if let document = pdfView.document, document.pageCount > committedPageCount {
+            let previous = pdfView.currentPage.map { document.index(for: $0) }
+            while document.pageCount > committedPageCount { document.removePage(at: document.pageCount - 1) }
+            pdfView.layoutDocumentView()
+            if let previous, previous >= document.pageCount, let last = document.page(at: document.pageCount - 1) { pdfView.go(to: last) }
+            reportPage()
+        }
+    }
+
     private func replace(_ document: PDFDocument, revision: Int = Int.max) {
         _ = view
         let previousPage = pdfView.currentPage.map { pdfView.document?.index(for: $0) ?? 0 }
@@ -137,6 +164,7 @@ final class PDFPaneController: NSViewController {
             previousDocuments.append(previous)
             if previousDocuments.count > 2 { previousDocuments.removeFirst() }
         }
+        committedPageCount = document.pageCount
         liveOverlay.install(document: document, revision: revision)
         pdfView.document = document
         if !fitting { pdfView.scaleFactor = scale }

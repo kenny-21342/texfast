@@ -408,6 +408,14 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
 
     private func startRealtime() {
         let engine = RealtimeController(main: fileURL)
+        engine.onPagePreview = { [weak self] page, units in
+            self?.preview.displayPagePreview(page, units: units)
+            self?.followCursor()
+        }
+        engine.onPagePreviewReset = { [weak self] units in
+            self?.preview.resetPagePreviews(units: units)
+            self?.followCursor()
+        }
         engine.onFast = { [weak self] unit in self?.preview.displayFast(unit) }
         engine.onPDF = { [weak self] data, revision, _ in
             guard let self else { return }
