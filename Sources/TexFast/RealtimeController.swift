@@ -61,13 +61,13 @@ final class RealtimeController {
     }
 
     func start() {
-        guard let resources = Bundle.main.resourceURL else { return }
+        guard let engine = EnginePackage.runtime else { return }
         let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rtex-host")
         guard FileManager.default.isExecutableFile(atPath: binary.path) else { return }
         available = true
         queue.async { [self] in
             guard !stopping else { return }
-            let cache = RealtimeBuildCache(root: root, main: main)
+            let cache = RealtimeBuildCache(root: root, main: main, engineVersion: engine.version)
             cache.prepare(main: main)
             buildCache = cache; buildDirectory = cache.directory
             let p = Process(), out = Pipe(), err = Pipe(), stdin = Pipe()
@@ -77,7 +77,8 @@ final class RealtimeController {
             p.currentDirectoryURL = root
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/Library/TeX/texbin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-            env["RTEX_TEXDIR"] = resources.appendingPathComponent("rtex/tex").path
+            env["RTEX_TEXDIR"] = engine.tex.path
+            env["RTEX_ENGINE_BINARY"] = engine.binary.path
             env.removeValue(forKey: "TOOLCHAINS")
             p.environment = env
             // Establish snapshots before input commands are enqueued. rtex opens the same

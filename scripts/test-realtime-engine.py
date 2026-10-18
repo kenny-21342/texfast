@@ -2,14 +2,14 @@
 """Exercise the bundled host protocol without writing editor changes to source."""
 import json, os, pathlib, queue, subprocess, tempfile, threading, time
 repo = pathlib.Path(__file__).resolve().parent.parent
-engine = repo / '.build/realtime-engine/bin/rtex'
+engine = pathlib.Path(os.environ.get('TEXFAST_TEST_ENGINE', repo / '.build/realtime-engine/bin/rtex'))
 with tempfile.TemporaryDirectory(prefix='texfast-realtime-') as directory:
     root = pathlib.Path(directory)
     source = '\\documentclass{article}\n\\begin{document}\nHello world. A paragraph for live editing.\n\n\\input{chapter}\n\\end{document}\n'
     chapter = 'An included paragraph with Unicode café.\n'
     (root / 'main.tex').write_text(source)
     (root / 'chapter.tex').write_text(chapter)
-    env = dict(os.environ, RTEX_TEXDIR=str(repo / '.build/realtime-engine/share/rtex/tex'))
+    env = dict(os.environ, RTEX_TEXDIR=os.environ.get('TEXFAST_TEST_ENGINE_TEXDIR', str(repo / '.build/realtime-engine/share/rtex/tex')))
     env['PATH'] = '/Library/TeX/texbin:' + env.get('PATH', '')
     p = subprocess.Popen([str(engine), 'serve', '--project', str(root), '--main', 'main.tex', '--build', str(root / 'cache')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     events = queue.Queue()

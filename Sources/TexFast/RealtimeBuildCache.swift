@@ -9,9 +9,14 @@ final class RealtimeBuildCache {
     let persistent: Bool
     private var lockFD: Int32 = -1
 
-    init(root: URL, main: URL) {
+    init(root: URL, main: URL, engineVersion: String? = nil) {
         let base = root.appendingPathComponent(".texfast/realtime/\(main.deletingPathExtension().lastPathComponent)", isDirectory: true)
-        let shared = base.appendingPathComponent("cache-v1", isDirectory: true)
+        // Captures include engine-specific macros and placements. Never warm-start
+        // a newly installed engine from another release's captured state.
+        let suffix = engineVersion.flatMap { version in
+            version.allSatisfy({ $0.isNumber || $0 == "." || $0 == "v" }) ? "-\(version)" : nil
+        } ?? ""
+        let shared = base.appendingPathComponent("cache-v1\(suffix)", isDirectory: true)
         try? FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
         let fd = open(shared.appendingPathComponent(".owner.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         let supervisor = (try? String(contentsOf: shared.appendingPathComponent(".supervisor.pid"), encoding: .utf8))

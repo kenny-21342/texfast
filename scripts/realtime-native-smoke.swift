@@ -45,7 +45,7 @@ import TexFastCore
             print(text)
             engine.stop()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                let cache = RealtimeBuildCache(root: root, main: main)
+                let cache = RealtimeBuildCache(root: root, main: main, engineVersion: EnginePackage.runtime?.version)
                 if !cache.persistent || cache.directory != engine.buildDirectory {
                     print("FAIL: shutdown did not release the reusable engine cache")
                     try? FileManager.default.removeItem(at: root)

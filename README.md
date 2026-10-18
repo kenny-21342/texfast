@@ -1,8 +1,12 @@
 # TexFast Realtime — alternative release
 
-This `realtime-tex` branch integrates [realtime-tex v0.0.10](https://github.com/kenny-21342/realtime-tex/releases/tag/v0.0.10) into the native editor through its persistent `rtex serve` API. The live PDF pane uses **Apple PDFKit**, with native AppKit controls and selectable PDF text.
+This `realtime-tex` branch integrates [realtime-tex v0.0.11](https://github.com/kenny-21342/realtime-tex/releases/tag/v0.0.11) into the native editor through its persistent `rtex serve` API. The live PDF pane uses **Apple PDFKit**, with native AppKit controls and selectable PDF text.
 
-Download **TexFast-Realtime-v1.2.0-realtime.8-macOS-arm64.zip** from the [alternative release](https://github.com/kenny-21342/texfast/releases/tag/v1.2.0-realtime.8). It contains **TexFast Realtime.app**, with a separate app identifier and settings so it can coexist with TexFast. Its teal document-and-waveform icon distinguishes it from the purple standard app. This Apple Silicon build requires macOS 13+ and **TeX Live 2026** with LuaLaTeX. The engine is bundled; Rust, Node.js, and VS Code are unnecessary to run the app. Building requires Xcode command-line tools. The app is ad-hoc signed, without notarization.
+Download **TexFast-Realtime-v1.2.0-realtime.9-macOS-arm64.zip** from the [alternative release](https://github.com/kenny-21342/texfast/releases/tag/v1.2.0-realtime.9). It contains **TexFast Realtime.app**, with a separate app identifier and settings so it can coexist with TexFast. Its teal document-and-waveform icon distinguishes it from the purple standard app. This Apple Silicon build requires macOS 13+ and **TeX Live 2026** with LuaLaTeX. The engine is bundled; Rust, Node.js, and VS Code are unnecessary to run the app. Building requires Xcode command-line tools. The app is ad-hoc signed, without notarization.
+
+**TexFast Realtime → Check for Engine Updates…** checks the stable releases of `kenny-21342/realtime-tex` on GitHub. The native update window shows the running and bundled engine versions, release notes, and an Install button when an update is available. Downloads match this Mac’s architecture and are checked against GitHub’s SHA-256 asset digest; the executable and complete Lua resources install together under `~/Library/Application Support/com.kenny-lhs.texfast.realtime/Engines/`. The signed app bundle stays intact. Updates take effect after quitting and reopening the app, so open documents retain their current engine and resources. **Use Bundled Engine…** selects the packaged version for the next launch. Startup caches are separate for each engine release; the first opening after an engine upgrade must build its own cache. Checks are manual, and releases outside the bundled engine’s major/minor series require an app update.
+
+Engine v0.0.11 includes upstream fixes for comment eligibility, two-column placements, IEEEtran floats and run-in headings, included-file environments, math alphabets, and diagnostic continuation lines. The native live preview and per-keystroke edit path remain in use.
 
 With **Live Preview while Typing** enabled, edits go directly from the unsaved editor buffer to the persistent engine. Eligible unit updates draw immediately through **CoreText/CoreGraphics overlays managed by PDFKit**, using the actual TeX font files and engine glyph positions. The fast path has no typing debounce. Native support includes static OpenType/TrueType and Type 1 fonts, math, rules, colors, bitmap images, and basic TikZ paths/clips. Unsupported or degraded material retains its last complete drawing until the background PDF arrives.
 
@@ -31,6 +35,7 @@ Validation:
 ```sh
 xcrun --toolchain default swift test
 python3 scripts/test-realtime-engine.py
+./scripts/test-engine-updates.sh  # actual GitHub download, native Install button, isolated rollback
 ./scripts/test-realtime-native.sh  # after building TexFast Realtime.app; opens a disposable native window
 ./scripts/test-realtime-audit.sh  # renderer, editor lifecycle, and actual hung-engine cleanup
 ./scripts/test-realtime-startup.sh  # native follow behavior, cold fixture, cache reopening

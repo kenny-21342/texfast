@@ -43,6 +43,14 @@ int main(int argc, char **argv) {
     char *slash = strrchr(resolved, '/');
     if (!slash || (size_t)(slash - resolved) + sizeof("/rtex") > sizeof(resolved)) return 127;
     strcpy(slash, "/rtex");
+    // The app pins one immutable engine/resources package for its lifetime.
+    // Keep this supervisor in the app so updated engines retain worker cleanup.
+    const char *selected = getenv("RTEX_ENGINE_BINARY");
+    if (selected && selected[0]) {
+        if (!realpath(selected, resolved) || access(resolved, X_OK) != 0) {
+            perror("rtex-host: selected engine"); return 127;
+        }
+    }
     // Foundation may already have made us a group leader. Either way, the group
     // must be ours before the Rust process and its workers can launch.
     if (setsid() < 0 && getpgrp() != getpid()) {

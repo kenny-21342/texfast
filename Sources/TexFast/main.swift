@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var homeController: HomeWindowController?
     private var aboutController: AboutWindowController?
     private var settingsController: SettingsWindowController?
+    private var engineUpdateController: EngineUpdateWindowController?
     private var finalRenderWindow: NSWindow?
     private var finalRenderLabel: NSTextField?
     private var finalRenderProgress: NSProgressIndicator?
@@ -13,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        _ = EnginePackage.runtime
         buildMenu()
 
         // A path on the command line opens straight away; otherwise ask.
@@ -153,6 +155,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.window?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func checkEngineUpdates(_ sender: Any?) {
+        guard let bundled = EnginePackage.bundled(), let running = EnginePackage.runtime else { return }
+        if engineUpdateController == nil {
+            engineUpdateController = EngineUpdateWindowController(bundled: bundled, running: running)
+        }
+        engineUpdateController?.showAndCheck()
+    }
+
     private func openDocument(at url: URL) {
         let url = url.resolvingSymlinksInPath().standardizedFileURL
         if let existing = controllers.first(where: { $0.documentURL == url }) {
@@ -175,6 +185,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         let about = appMenu.addItem(withTitle: "About TexFast", action: #selector(showAbout(_:)), keyEquivalent: "")
         about.target = self
+        if EnginePackage.bundled() != nil {
+            let update = appMenu.addItem(withTitle: "Check for Engine Updates…",
+                                         action: #selector(checkEngineUpdates(_:)), keyEquivalent: "")
+            update.target = self
+        }
         appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settings.target = self

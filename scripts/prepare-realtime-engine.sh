@@ -2,11 +2,11 @@
 # Bundle the verified upstream release host and its matching Lua resources.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version=v0.0.10
-revision=83466a1c1293a5b1525f8bcc53c4ea95130dca5a
+version=v0.0.11
+revision=70453469f68ac5866dad33053d90569a4c7a162b
 case "${RTEX_ARCH:-$(uname -m)}" in
-  arm64|aarch64) target=aarch64-apple-darwin; expected=8a56e73f4798e27caa9d8d971b901e497cca7219a87241e488cc602c075c5e97 ;;
-  x86_64) target=x86_64-apple-darwin; expected=c9c66071a0e0f7bc81898cba8697673d638031ffd86d53eeb22c99053b3cbbbf ;;
+  arm64|aarch64) target=aarch64-apple-darwin; expected=f4582c0c24a2defb6c3eadffcf25f3bd0b2bc118b441d1cb598dc280cba070be ;;
+  x86_64) target=x86_64-apple-darwin; expected=c05efb55990676068849ed199de736a4845d99720deb13297b314ae336059454 ;;
   *) echo 'Unsupported macOS architecture' >&2; exit 1 ;;
 esac
 cache=".build/realtime-download"

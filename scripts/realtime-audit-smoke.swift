@@ -199,6 +199,11 @@ import TexFastCore
         check(reopenedLease.persistent && reopenedLease.directory == firstLease.directory,
               "the previous engine cache survives shutdown and is reused")
         reopenedLease.release()
+        let engine11 = RealtimeBuildCache(root: root, main: source, engineVersion: "v0.0.11")
+        let engine12 = RealtimeBuildCache(root: root, main: source, engineVersion: "v0.0.12")
+        check(engine11.persistent && engine12.persistent && engine11.directory != engine12.directory,
+              "different engine releases never share startup captures or picture caches")
+        engine11.release(); engine12.release()
         let composed = "caf\u{e9}\n", decomposed = "cafe\u{301}\n"
         try composed.write(to: source, atomically: true, encoding: .utf8)
         _ = editor.view; try editor.load(source)
